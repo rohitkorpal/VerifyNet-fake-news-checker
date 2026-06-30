@@ -4,6 +4,7 @@ import numpy as np
 import os
 import time
 import pickle
+import requests
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -192,6 +193,40 @@ def load_models_from_disk():
         return vectorizer, knn, log_reg, rf, nn, metrics
     except Exception as e:
         return None
+
+def fetch_live_news(query, api_key):
+    url = f"https://newsapi.org/v2/everything?q={query}&apiKey={api_key}&language=en&pageSize=5"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            return response.json().get("articles", [])
+        else:
+            return None
+    except Exception as e:
+        return None
+
+def fetch_newsdata_io(query, api_key):
+    url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={query}&language=en"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            return response.json().get("results", [])[:5]
+        else:
+            return None
+    except Exception as e:
+        return None
+
+def load_env_api_key(key_name):
+    if os.path.exists(".env"):
+        try:
+            with open(".env", "r") as f:
+                for line in f:
+                    parts = line.strip().split("=", 1)
+                    if len(parts) == 2 and parts[0].strip() == key_name:
+                        return parts[1].strip()
+        except Exception:
+            pass
+    return ""
 
 # State Initialization (Must run before sidebar is drawn)
 if "trained" not in st.session_state:
@@ -571,10 +606,10 @@ with tab2:
 
 # TAB 3: LIVE PREDICTOR
 with tab3:
-    st.markdown("### 🔮 Predict Authenticity of Custom News")
-    st.markdown("Enter or paste a news headline/body paragraph below, and see what our four from-scratch models predict.")
-    
-    # Load examples helper
+    st.markdown("### 🔮 Verify News & Search Live Coverage")
+    st.markdown("Paste a news headline or article body below. The system will classify the text using our trained models and automatically search both **NewsAPI** and **NewsData.io** to retrieve matching live news reports to support the model's decision.")
+
+    # Load example buttons
     example_text = ""
     col_ex1, col_ex2 = st.columns(2)
     with col_ex1:
@@ -593,37 +628,51 @@ with tab3:
                 "to lead the free world, praising his stances on border control and economic expansion. The statement has "
                 "ignited a massive controversy across global religious organizations."
             )
-            
-    news_input = st.text_area("News text to evaluate:", value=example_text, height=180, 
-                             placeholder="Paste your news text here...")
-                             
-    if st.button("🔍 Run Classification Predictions", use_container_width=True):
+
+    news_input = st.text_area("News text to verify:", value=example_text, height=180, 
+                             placeholder="Enter headline or article paragraph here...")
+
+    # Load API keys silently from .env
+    news_api_key = load_env_api_key("NEWS_API_KEY")
+    newsdata_api_key = load_env_api_key("NEWSDATA_API_KEY")
+
+    # Clean text to pre-extract search query keyword candidates
+    temp_clean = preprocess_pipeline(news_input)
+    words = temp_clean.split()
+    # Extract first 5 words as default query topic
+    default_query = " ".join(words[:5]) if len(words) > 0 else "politics"
+
+    # Optional Fact-Check Settings
+    with st.expander("⚙️ Fact-Check Search Settings"):
+        custom_query = st.text_input("Customize Fact-Check Search Topic (extracted automatically from text):", value=default_query)
+        st.markdown(f"**NewsAPI status:** {'🟢 Configured' if news_api_key else '⚠️ Not configured in .env'}")
+        st.markdown(f"**NewsData.io status:** {'🟢 Configured' if newsdata_api_key else '⚠️ Not configured in .env'}")
+
+    verify_trigger = st.button("🔍 Verify Article & Search Live Coverage", use_container_width=True)
+
+    if verify_trigger:
         if not st.session_state.trained:
             st.error("⚠️ Please train the models first using Tab 2 or the sidebar button!")
         elif not news_input.strip():
-            st.warning("⚠️ Please enter some news text to analyze.")
+            st.warning("⚠️ Please enter some news text to verify.")
         else:
-            with st.spinner("Analyzing text..."):
-                # Clean input
+            # 1. Classification Phase
+            with st.spinner("Analyzing text and running custom model predictions..."):
                 clean_input = preprocess_pipeline(news_input)
-                
-                # Transform using TF-IDF
                 x_input = st.session_state.vectorizer.transform([clean_input])
-                
-                # Predict
+
                 p_knn = st.session_state.knn.predict(x_input)[0]
                 p_log = st.session_state.log_reg.predict(x_input)[0]
                 p_rf = st.session_state.rf.predict(x_input)[0]
                 p_nn = st.session_state.nn.predict(x_input)[0]
-                
-                # Sigmoid probabilities (for models supporting it)
+
                 prob_log = st.session_state.log_reg.predict_proba(x_input)[0]
                 prob_nn = st.session_state.nn.predict_proba(x_input)[0]
-                
+
+                st.markdown("### 🏆 Trained Models Decisions")
                 col_pred1, col_pred2 = st.columns(2)
-                
+
                 with col_pred1:
-                    # KNN Predict Card
                     cls_knn = "model-card-fake" if p_knn == 1 else "model-card-real"
                     lbl_knn = "🚨 FAKE NEWS" if p_knn == 1 else "🟢 REAL NEWS"
                     st.markdown(f"""
@@ -633,8 +682,7 @@ with tab3:
                         <div style='font-size:0.85rem; opacity:0.85;'>Based on k={k_neighbors} closest articles</div>
                     </div>
                     """, unsafe_allow_html=True)
-                    
-                    # Random Forest Predict Card
+
                     cls_rf = "model-card-fake" if p_rf == 1 else "model-card-real"
                     lbl_rf = "🚨 FAKE NEWS" if p_rf == 1 else "🟢 REAL NEWS"
                     st.markdown(f"""
@@ -644,9 +692,8 @@ with tab3:
                         <div style='font-size:0.85rem; opacity:0.85;'>Aggregated vote from {rf_trees} decision trees</div>
                     </div>
                     """, unsafe_allow_html=True)
-                    
+
                 with col_pred2:
-                    # Logistic Regression Card
                     cls_log = "model-card-fake" if p_log == 1 else "model-card-real"
                     lbl_log = "🚨 FAKE NEWS" if p_log == 1 else "🟢 REAL NEWS"
                     pct_log = prob_log if p_log == 1 else (1.0 - prob_log)
@@ -657,8 +704,7 @@ with tab3:
                         <div style='font-size:0.85rem; opacity:0.85;'>Confidence probability: {pct_log:.2%}</div>
                     </div>
                     """, unsafe_allow_html=True)
-                    
-                    # Simple Neural Network Card
+
                     cls_nn = "model-card-fake" if p_nn == 1 else "model-card-real"
                     lbl_nn = "🚨 FAKE NEWS" if p_nn == 1 else "🟢 REAL NEWS"
                     pct_nn = prob_nn if p_nn == 1 else (1.0 - prob_nn)
@@ -669,3 +715,64 @@ with tab3:
                         <div style='font-size:0.85rem; opacity:0.85;'>Confidence probability: {pct_nn:.2%}</div>
                     </div>
                     """, unsafe_allow_html=True)
+
+            # 2. Fact-Checking Phase (Background Live News Search)
+            st.markdown("---")
+            st.markdown(f"### 📡 Live Coverage & Supporting Evidence")
+            st.markdown(f"Searching APIs for active global news matching topic: **\"{custom_query}\"**...")
+
+            col_newsapi, col_newsdata = st.columns(2)
+
+            # Fetch NewsAPI Results
+            with col_newsapi:
+                st.markdown("#### 📰 NewsAPI Coverage")
+                if not news_api_key:
+                    st.info("⚠️ NewsAPI key is not configured in `.env` file.")
+                else:
+                    with st.spinner("Searching NewsAPI..."):
+                        raw_api = fetch_live_news(custom_query, news_api_key)
+                        if raw_api is None:
+                            st.error("❌ Failed to query NewsAPI.")
+                        elif len(raw_api) == 0:
+                            st.warning("🔍 No matching coverage found on NewsAPI.")
+                        else:
+                            for idx, art in enumerate(raw_api):
+                                title = art.get('title', 'No Title')
+                                source = art.get('source', {}).get('name', 'Unknown Source')
+                                url = art.get('url', '#')
+                                desc = art.get('description', '')
+                                date = art.get('publishedAt', '')[:10]
+
+                                st.markdown(f"##### {idx+1}. [{source}] {title}")
+                                st.markdown(f"Published: {date} | [Read full article]({url})")
+                                if desc:
+                                    st.write(desc)
+                                st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
+
+            # Fetch NewsData.io Results
+            with col_newsdata:
+                st.markdown("#### 📡 NewsData.io Coverage")
+                if not newsdata_api_key:
+                    st.info("⚠️ NewsData.io key is not configured in `.env` file.")
+                else:
+                    with st.spinner("Searching NewsData.io..."):
+                        raw_data = fetch_newsdata_io(custom_query, newsdata_api_key)
+                        if raw_data is None:
+                            st.error("❌ Failed to query NewsData.io.")
+                        elif len(raw_data) == 0:
+                            st.warning("🔍 No matching coverage found on NewsData.io.")
+                        else:
+                            for idx, art in enumerate(raw_data):
+                                title = art.get('title', 'No Title')
+                                source = art.get('source_id', 'Unknown Source').upper()
+                                url = art.get('link', '#')
+                                desc = art.get('description', '')
+                                date = art.get('pubDate', '')[:10] if art.get('pubDate') else ''
+
+                                pub_str = f"Published: {date} | " if date else ""
+                                st.markdown(f"##### {idx+1}. [{source}] {title}")
+                                st.markdown(f"{pub_str}[Read full article]({url})")
+                                if desc:
+                                    st.write(desc)
+                                st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
+
