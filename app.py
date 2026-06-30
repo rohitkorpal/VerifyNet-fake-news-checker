@@ -274,6 +274,64 @@ def extract_query_with_gemini(text):
     
     return _fallback_query(text)
 
+def gemini_fact_check(text):
+    """Ask Gemini to analyze a news article and determine if it is likely real or fake with reasoning."""
+    gemini_key = load_env_api_key("GEMINI_API_KEY")
+    if not gemini_key or not text.strip():
+        return None
+    
+    prompt = (
+        "You are an expert fact-checker and journalist. Analyze the following news article and determine "
+        "whether it is likely REAL or FAKE news.\n\n"
+        "Evaluate based on:\n"
+        "1. Writing style (sensationalist language, clickbait, emotional manipulation)\n"
+        "2. Source credibility clues (anonymous sources, vague attribution)\n"
+        "3. Factual plausibility (are the claims realistic and verifiable?)\n"
+        "4. Known misinformation patterns (too good/bad to be true, conspiracy theories)\n\n"
+        "Respond in EXACTLY this format (3 lines only):\n"
+        "VERDICT: FAKE or REAL\n"
+        "CONFIDENCE: a number from 1 to 100\n"
+        "REASONING: One paragraph explaining your analysis (2-4 sentences max)\n\n"
+        f"Article:\n{text[:800]}"
+    )
+    
+    models = ["gemini-2.5-flash", "gemini-flash-lite-latest"]
+    
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 200}
+        }
+        
+        try:
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                response_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                
+                # Parse the structured response
+                result = {"verdict": "UNKNOWN", "confidence": 50, "reasoning": "Unable to analyze."}
+                
+                for line in response_text.split('\n'):
+                    line = line.strip()
+                    if line.upper().startswith("VERDICT:"):
+                        v = line.split(":", 1)[1].strip().upper()
+                        result["verdict"] = "FAKE" if "FAKE" in v else "REAL"
+                    elif line.upper().startswith("CONFIDENCE:"):
+                        try:
+                            result["confidence"] = int(''.join(filter(str.isdigit, line.split(":", 1)[1].strip()))[:3])
+                        except (ValueError, IndexError):
+                            pass
+                    elif line.upper().startswith("REASONING:"):
+                        result["reasoning"] = line.split(":", 1)[1].strip()
+                
+                return result
+        except Exception:
+            continue
+    
+    return None
+
 def _fallback_query(text):
     """Smart fallback: strip news prefixes and extract meaningful keywords without AI."""
     if not text.strip():
@@ -802,6 +860,9 @@ with tab3:
             st.markdown(f"Searching both news APIs for live coverage matching: **\"{search_query}\"**...")
 
             col_newsapi, col_newsdata = st.columns(2)
+            
+            newsapi_count = 0
+            newsdata_count = 0
 
             # Fetch NewsAPI Results
             with col_newsapi:
@@ -816,6 +877,7 @@ with tab3:
                         elif len(raw_api) == 0:
                             st.warning("🔍 No matching coverage found on NewsAPI.")
                         else:
+                            newsapi_count = len(raw_api)
                             for idx, art in enumerate(raw_api):
                                 title = art.get('title', 'No Title')
                                 source = art.get('source', {}).get('name', 'Unknown Source')
@@ -842,6 +904,7 @@ with tab3:
                         elif len(raw_data) == 0:
                             st.warning("🔍 No matching coverage found on NewsData.io.")
                         else:
+                            newsdata_count = len(raw_data)
                             for idx, art in enumerate(raw_data):
                                 title = art.get('title', 'No Title')
                                 source = art.get('source_id', 'Unknown Source').upper()
@@ -856,3 +919,113 @@ with tab3:
                                     st.write(desc)
                                 st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
+            # ============================================================
+            # 3. UNIFIED AI VERDICT — Combining all signals
+            # ============================================================
+            st.markdown("---")
+            st.markdown("### 🧠 Unified AI Verdict")
+            
+            with st.spinner("🤖 Gemini AI is analyzing the article for fact-checking..."):
+                gemini_result = gemini_fact_check(news_input)
+            
+            # Signal 1: ML Model Ensemble Vote
+            predictions = [p_knn, p_log, p_rf, p_nn]
+            fake_votes = sum(predictions)
+            real_votes = 4 - fake_votes
+            model_verdict = "FAKE" if fake_votes > real_votes else "REAL"
+            model_confidence = max(fake_votes, real_votes) / 4.0 * 100
+            
+            # Signal 2: Cross-Reference Score (more sources = more likely real)
+            total_sources = newsapi_count + newsdata_count
+            if total_sources >= 5:
+                cross_ref_score = 80  # Well covered — likely real
+            elif total_sources >= 2:
+                cross_ref_score = 50  # Some coverage
+            else:
+                cross_ref_score = 20  # No/minimal coverage — suspicious
+            
+            # Signal 3: Gemini AI Verdict
+            gemini_verdict = "UNKNOWN"
+            gemini_confidence = 50
+            gemini_reasoning = "Gemini API was unavailable for analysis."
+            if gemini_result:
+                gemini_verdict = gemini_result["verdict"]
+                gemini_confidence = gemini_result["confidence"]
+                gemini_reasoning = gemini_result["reasoning"]
+            
+            # Final Weighted Credibility Score
+            # Weights: ML Models = 35%, Cross-Reference = 25%, Gemini AI = 40%
+            model_score = (real_votes / 4.0) * 100  # 0 = all say fake, 100 = all say real
+            gemini_score = gemini_confidence if gemini_verdict == "REAL" else (100 - gemini_confidence)
+            
+            final_credibility = int(model_score * 0.35 + cross_ref_score * 0.25 + gemini_score * 0.40)
+            final_credibility = max(0, min(100, final_credibility))
+            
+            if final_credibility >= 60:
+                final_verdict = "LIKELY REAL"
+                verdict_color = "#10B981"
+                verdict_emoji = "🟢"
+                verdict_bg = "rgba(16, 185, 129, 0.15)"
+            elif final_credibility >= 40:
+                final_verdict = "UNCERTAIN"
+                verdict_color = "#F59E0B"
+                verdict_emoji = "🟡"
+                verdict_bg = "rgba(245, 158, 11, 0.15)"
+            else:
+                final_verdict = "LIKELY FAKE"
+                verdict_color = "#EF4444"
+                verdict_emoji = "🔴"
+                verdict_bg = "rgba(239, 68, 68, 0.15)"
+            
+            # Display the 3 signals side-by-side
+            sig1, sig2, sig3 = st.columns(3)
+            
+            with sig1:
+                st.markdown(f"""
+                <div style='background: rgba(99, 102, 241, 0.15); border: 1px solid #6366F1; border-radius: 12px; padding: 16px; text-align: center;'>
+                    <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>📊 ML Models ({fake_votes}/4 say Fake)</div>
+                    <h3 style='margin: 0; color: {"#EF4444" if model_verdict == "FAKE" else "#10B981"};'>{"🔴 FAKE" if model_verdict == "FAKE" else "🟢 REAL"}</h3>
+                    <div style='font-size: 0.8rem; opacity: 0.7;'>Confidence: {model_confidence:.0f}%</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with sig2:
+                src_label = f"{total_sources} sources found" if total_sources > 0 else "No sources found"
+                st.markdown(f"""
+                <div style='background: rgba(99, 102, 241, 0.15); border: 1px solid #6366F1; border-radius: 12px; padding: 16px; text-align: center;'>
+                    <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>🔍 Cross-Reference ({src_label})</div>
+                    <h3 style='margin: 0; color: {"#10B981" if cross_ref_score >= 50 else "#EF4444"};'>{"✅ Covered" if total_sources >= 2 else "⚠️ Not Covered"}</h3>
+                    <div style='font-size: 0.8rem; opacity: 0.7;'>Score: {cross_ref_score}/100</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with sig3:
+                st.markdown(f"""
+                <div style='background: rgba(99, 102, 241, 0.15); border: 1px solid #6366F1; border-radius: 12px; padding: 16px; text-align: center;'>
+                    <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>🤖 Gemini AI Analysis</div>
+                    <h3 style='margin: 0; color: {"#EF4444" if gemini_verdict == "FAKE" else "#10B981" if gemini_verdict == "REAL" else "#F59E0B"};'>{"🔴 FAKE" if gemini_verdict == "FAKE" else "🟢 REAL" if gemini_verdict == "REAL" else "❓ N/A"}</h3>
+                    <div style='font-size: 0.8rem; opacity: 0.7;'>Confidence: {gemini_confidence}%</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Gemini Reasoning
+            if gemini_result:
+                st.markdown(f"""
+                <div style='background: rgba(30, 41, 59, 0.8); border-left: 4px solid #6366F1; padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 12px 0;'>
+                    <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>🤖 Gemini's Reasoning:</div>
+                    <div style='color: #E2E8F0;'>{gemini_reasoning}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Final Verdict Card with Credibility Bar
+            st.markdown(f"""
+            <div style='background: {verdict_bg}; border: 2px solid {verdict_color}; border-radius: 16px; padding: 24px; text-align: center; margin-top: 16px;'>
+                <div style='font-size: 1rem; color: #94A3B8; margin-bottom: 8px;'>FINAL COMBINED VERDICT</div>
+                <h1 style='margin: 0; color: {verdict_color}; font-size: 2.2rem;'>{verdict_emoji} {final_verdict}</h1>
+                <div style='font-size: 1.1rem; color: #CBD5E1; margin-top: 8px;'>Credibility Score: <strong style="color: {verdict_color};">{final_credibility}/100</strong></div>
+                <div style='background: #1E293B; border-radius: 10px; height: 20px; margin-top: 12px; overflow: hidden;'>
+                    <div style='background: {verdict_color}; height: 100%; width: {final_credibility}%; border-radius: 10px; transition: width 0.5s;'></div>
+                </div>
+                <div style='font-size: 0.75rem; color: #64748B; margin-top: 8px;'>Weighted: ML Models (35%) + Cross-Reference (25%) + Gemini AI (40%)</div>
+            </div>
+            """, unsafe_allow_html=True)
