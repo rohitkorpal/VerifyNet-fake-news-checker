@@ -274,25 +274,27 @@ def extract_query_with_gemini(text):
     
     return _fallback_query(text)
 
-def gemini_fact_check(text):
-    """Ask Gemini to analyze a news article and determine if it is likely real or fake with reasoning."""
+def gemini_fact_check(text, search_query=""):
+    """Ask Gemini to analyze a news article and determine if it is likely real or fake.
+    Uses headline + extracted keywords instead of full article to save API tokens."""
     gemini_key = load_env_api_key("GEMINI_API_KEY")
     if not gemini_key or not text.strip():
         return None
     
+    # Build a compact summary: first sentence + keywords (saves ~70% tokens vs full article)
+    first_line = text.strip().split('\n')[0].strip()
+    # Take first ~200 chars as headline context
+    headline = first_line[:200]
+    
     prompt = (
-        "You are an expert fact-checker and journalist. Analyze the following news article and determine "
-        "whether it is likely REAL or FAKE news.\n\n"
-        "Evaluate based on:\n"
-        "1. Writing style (sensationalist language, clickbait, emotional manipulation)\n"
-        "2. Source credibility clues (anonymous sources, vague attribution)\n"
-        "3. Factual plausibility (are the claims realistic and verifiable?)\n"
-        "4. Known misinformation patterns (too good/bad to be true, conspiracy theories)\n\n"
-        "Respond in EXACTLY this format (3 lines only):\n"
+        "You are an expert fact-checker. Determine if this news is REAL or FAKE.\n\n"
+        "Evaluate: writing style, source credibility, factual plausibility, misinformation patterns.\n\n"
+        "Respond in EXACTLY this format (3 lines):\n"
         "VERDICT: FAKE or REAL\n"
-        "CONFIDENCE: a number from 1 to 100\n"
-        "REASONING: One paragraph explaining your analysis (2-4 sentences max)\n\n"
-        f"Article:\n{text[:800]}"
+        "CONFIDENCE: number from 1 to 100\n"
+        "REASONING: 2-3 sentence explanation\n\n"
+        f"Headline: {headline}\n"
+        f"Topic keywords: {search_query}\n"
     )
     
     models = ["gemini-2.5-flash", "gemini-flash-lite-latest"]
@@ -301,7 +303,7 @@ def gemini_fact_check(text):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 200}
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 150}
         }
         
         try:
@@ -926,7 +928,7 @@ with tab3:
             st.markdown("### 🧠 Unified AI Verdict")
             
             with st.spinner("🤖 Gemini AI is analyzing the article for fact-checking..."):
-                gemini_result = gemini_fact_check(news_input)
+                gemini_result = gemini_fact_check(news_input, search_query)
             
             # Signal 1: ML Model Ensemble Vote
             predictions = [p_knn, p_log, p_rf, p_nn]
