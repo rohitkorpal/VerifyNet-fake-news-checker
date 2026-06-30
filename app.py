@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import time
+import pickle
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -148,6 +149,65 @@ def load_and_preprocess_subset(sample_size, vocab_size):
     
     return X, labels, vectorizer, clean_texts, df_all
 
+
+SAVED_MODELS_DIR = "saved_models"
+
+def save_models_to_disk(vectorizer, knn, log_reg, rf, nn, metrics):
+    if not os.path.exists(SAVED_MODELS_DIR):
+        os.makedirs(SAVED_MODELS_DIR)
+    
+    with open(os.path.join(SAVED_MODELS_DIR, "vectorizer.pkl"), "wb") as f:
+        pickle.dump(vectorizer, f)
+    with open(os.path.join(SAVED_MODELS_DIR, "knn.pkl"), "wb") as f:
+        pickle.dump(knn, f)
+    with open(os.path.join(SAVED_MODELS_DIR, "log_reg.pkl"), "wb") as f:
+        pickle.dump(log_reg, f)
+    with open(os.path.join(SAVED_MODELS_DIR, "rf.pkl"), "wb") as f:
+        pickle.dump(rf, f)
+    with open(os.path.join(SAVED_MODELS_DIR, "nn.pkl"), "wb") as f:
+        pickle.dump(nn, f)
+    with open(os.path.join(SAVED_MODELS_DIR, "metrics.pkl"), "wb") as f:
+        pickle.dump(metrics, f)
+
+def load_models_from_disk():
+    required_files = ["vectorizer.pkl", "knn.pkl", "log_reg.pkl", "rf.pkl", "nn.pkl", "metrics.pkl"]
+    for fname in required_files:
+        if not os.path.exists(os.path.join(SAVED_MODELS_DIR, fname)):
+            return None
+            
+    try:
+        with open(os.path.join(SAVED_MODELS_DIR, "vectorizer.pkl"), "rb") as f:
+            vectorizer = pickle.load(f)
+        with open(os.path.join(SAVED_MODELS_DIR, "knn.pkl"), "rb") as f:
+            knn = pickle.load(f)
+        with open(os.path.join(SAVED_MODELS_DIR, "log_reg.pkl"), "rb") as f:
+            log_reg = pickle.load(f)
+        with open(os.path.join(SAVED_MODELS_DIR, "rf.pkl"), "rb") as f:
+            rf = pickle.load(f)
+        with open(os.path.join(SAVED_MODELS_DIR, "nn.pkl"), "rb") as f:
+            nn = pickle.load(f)
+        with open(os.path.join(SAVED_MODELS_DIR, "metrics.pkl"), "rb") as f:
+            metrics = pickle.load(f)
+            
+        return vectorizer, knn, log_reg, rf, nn, metrics
+    except Exception as e:
+        return None
+
+# State Initialization (Must run before sidebar is drawn)
+if "trained" not in st.session_state:
+    loaded = load_models_from_disk()
+    if loaded is not None:
+        vectorizer_disk, knn_disk, log_reg_disk, rf_disk, nn_disk, metrics_disk = loaded
+        st.session_state.vectorizer = vectorizer_disk
+        st.session_state.knn = knn_disk
+        st.session_state.log_reg = log_reg_disk
+        st.session_state.rf = rf_disk
+        st.session_state.nn = nn_disk
+        st.session_state.metrics = metrics_disk
+        st.session_state.trained = True
+    else:
+        st.session_state.trained = False
+
 # Page Header
 st.markdown("<h1 class='main-title'>📰 AI-Powered Fake News Detector</h1>", unsafe_allow_html=True)
 st.markdown("<p class='sub-title'>A Complete Machine Learning Pipeline Implemented From Scratch</p>", unsafe_allow_html=True)
@@ -193,14 +253,18 @@ with st.sidebar.expander("Simple Neural Net Parameters"):
     nn_batch = st.select_slider("Batch Size", options=[8, 16, 32, 64, 128], value=32)
 
 st.sidebar.markdown("---")
+st.sidebar.markdown("### 💾 Pre-trained Models Status")
+if st.session_state.trained:
+    st.sidebar.success("🟢 Ready (Models loaded)")
+else:
+    st.sidebar.warning("⚠️ Retraining required (No models loaded)")
+st.sidebar.markdown("---")
 train_trigger = st.sidebar.button("🚀 Train All Models", use_container_width=True)
 
 # Tabs
 tab1, tab2, tab3 = st.tabs(["📊 Dataset & EDA", "⚡ Model Comparison", "🔮 Live Article Predictor"])
 
-# State Initialization
-if "trained" not in st.session_state:
-    st.session_state.trained = False
+# State Initialization completed above.
 
 # TAB 1: DATASET & EDA
 with tab1:
@@ -375,6 +439,9 @@ with tab2:
                 st.session_state.nn = nn
                 st.session_state.metrics = metrics
                 st.session_state.trained = True
+                
+                # Save to disk for persistence across restarts
+                save_models_to_disk(vectorizer, knn, log_reg, rf, nn, metrics)
                 
         metrics = st.session_state.metrics
         
