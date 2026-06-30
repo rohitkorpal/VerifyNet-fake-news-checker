@@ -5,6 +5,7 @@ import os
 import time
 import pickle
 import requests
+import json
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -227,6 +228,93 @@ def load_env_api_key(key_name):
         except Exception:
             pass
     return ""
+
+def extract_query_with_gemini(text):
+    """Use Gemini API to extract the best search keywords from a news article/headline."""
+    gemini_key = load_env_api_key("GEMINI_API_KEY")
+    if not gemini_key or not text.strip():
+        return _fallback_query(text)
+    
+    prompt = (
+        "Extract a specific news search query from the article below.\n\n"
+        "Rules:\n"
+        "- Return 4 to 6 keywords that describe the SPECIFIC event or claim in the article.\n"
+        "- NEVER return just a person's name alone (e.g. 'Trump' or 'Biden'). Always include WHAT happened.\n"
+        "- Include key subjects, actions, and objects (e.g. 'Trump Mars space colony plan').\n"
+        "- Remove source names (Reuters, AP), datelines, and filler words.\n"
+        "- Return ONLY the search query. No quotes, no explanation, no numbering.\n\n"
+        "Examples:\n"
+        "Article: 'Trump announces plan to build colony on Mars' → Trump Mars colony plan\n"
+        "Article: 'Pope Francis endorses Donald Trump for President' → Pope Francis endorses Trump President\n"
+        "Article: 'India launches new space mission to study the Sun' → India space mission Sun study\n\n"
+        f"Article:\n{text[:600]}"
+    )
+    
+    # Try multiple Gemini models in case one has quota
+    models = ["gemini-2.5-flash", "gemini-flash-lite-latest"]
+    
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 50}
+        }
+        
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                query = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                query = query.strip('"').strip("'").strip()
+                # Reject responses with fewer than 3 words — too generic for meaningful search
+                if query and len(query.split()) >= 3:
+                    return query
+        except Exception:
+            continue
+    
+    return _fallback_query(text)
+
+def _fallback_query(text):
+    """Smart fallback: strip news prefixes and extract meaningful keywords without AI."""
+    if not text.strip():
+        return "politics"
+    
+    # Take first line / first sentence (handle abbreviations like U.S., Dr.)
+    first_line = text.strip().split('\n')[0].strip()
+    # Only split by period if it looks like a real sentence boundary (followed by space + uppercase)
+    import re
+    sentences = re.split(r'(?<!\b[A-Z])\.(?=\s+[A-Z])', first_line)
+    first_sentence = sentences[0].strip() if sentences else first_line
+    
+    # Strip common dateline prefixes like "WASHINGTON (Reuters) - " 
+    if ' - ' in first_sentence:
+        parts = first_sentence.split(' - ', 1)
+        # Check if the part before dash looks like a dateline (e.g. WASHINGTON, LONDON (AP), NEW YORK (Reuters))
+        before_dash = parts[0].strip()
+        # Remove parenthesized source like (Reuters), (AP)
+        import re
+        dateline_part = re.sub(r'\([^)]*\)', '', before_dash).strip()
+        if dateline_part and dateline_part.replace(' ', '').isupper():
+            first_sentence = parts[1]
+    
+    # Strip "BREAKING:" type prefixes
+    prefixes_to_remove = ['BREAKING:', 'BREAKING NEWS:', 'UPDATE:', 'FLASH:', 'EXCLUSIVE:', 'OPINION:']
+    upper_sentence = first_sentence.upper()
+    for prefix in prefixes_to_remove:
+        if upper_sentence.startswith(prefix):
+            first_sentence = first_sentence[len(prefix):].strip()
+            break
+    
+    # Remove common stopwords and take first 5 meaningful words
+    stop = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'has', 'have', 'had', 'in', 'on', 'at', 
+            'to', 'for', 'of', 'by', 'with', 'from', 'and', 'or', 'but', 'that', 'this', 'it',
+            'its', 'his', 'her', 'their', 'our', 'your', 'today', 'said', 'says', 'say'}
+    words = first_sentence.split()
+    meaningful = [w.strip('.,!?:;\'"()') for w in words if w.lower().strip('.,!?:;\'"()') not in stop and len(w) > 1]
+    
+    if meaningful:
+        return " ".join(meaningful[:5])
+    return "politics"
 
 # State Initialization (Must run before sidebar is drawn)
 if "trained" not in st.session_state:
@@ -636,18 +724,6 @@ with tab3:
     news_api_key = load_env_api_key("NEWS_API_KEY")
     newsdata_api_key = load_env_api_key("NEWSDATA_API_KEY")
 
-    # Clean text to pre-extract search query keyword candidates
-    temp_clean = preprocess_pipeline(news_input)
-    words = temp_clean.split()
-    # Extract first 5 words as default query topic
-    default_query = " ".join(words[:5]) if len(words) > 0 else "politics"
-
-    # Optional Fact-Check Settings
-    with st.expander("⚙️ Fact-Check Search Settings"):
-        custom_query = st.text_input("Customize Fact-Check Search Topic (extracted automatically from text):", value=default_query)
-        st.markdown(f"**NewsAPI status:** {'🟢 Configured' if news_api_key else '⚠️ Not configured in .env'}")
-        st.markdown(f"**NewsData.io status:** {'🟢 Configured' if newsdata_api_key else '⚠️ Not configured in .env'}")
-
     verify_trigger = st.button("🔍 Verify Article & Search Live Coverage", use_container_width=True)
 
     if verify_trigger:
@@ -716,10 +792,14 @@ with tab3:
                     </div>
                     """, unsafe_allow_html=True)
 
-            # 2. Fact-Checking Phase (Background Live News Search)
+            # 2. Gemini Keyword Extraction Phase
             st.markdown("---")
-            st.markdown(f"### 📡 Live Coverage & Supporting Evidence")
-            st.markdown(f"Searching APIs for active global news matching topic: **\"{custom_query}\"**...")
+            with st.spinner("🤖 Gemini AI is extracting search keywords from your input..."):
+                search_query = extract_query_with_gemini(news_input)
+            
+            st.markdown("### 📡 Live Coverage & Supporting Evidence")
+            st.success(f"🔑 **Gemini Extracted Keywords:** `{search_query}`")
+            st.markdown(f"Searching both news APIs for live coverage matching: **\"{search_query}\"**...")
 
             col_newsapi, col_newsdata = st.columns(2)
 
@@ -730,7 +810,7 @@ with tab3:
                     st.info("⚠️ NewsAPI key is not configured in `.env` file.")
                 else:
                     with st.spinner("Searching NewsAPI..."):
-                        raw_api = fetch_live_news(custom_query, news_api_key)
+                        raw_api = fetch_live_news(search_query, news_api_key)
                         if raw_api is None:
                             st.error("❌ Failed to query NewsAPI.")
                         elif len(raw_api) == 0:
@@ -756,7 +836,7 @@ with tab3:
                     st.info("⚠️ NewsData.io key is not configured in `.env` file.")
                 else:
                     with st.spinner("Searching NewsData.io..."):
-                        raw_data = fetch_newsdata_io(custom_query, newsdata_api_key)
+                        raw_data = fetch_newsdata_io(search_query, newsdata_api_key)
                         if raw_data is None:
                             st.error("❌ Failed to query NewsData.io.")
                         elif len(raw_data) == 0:
