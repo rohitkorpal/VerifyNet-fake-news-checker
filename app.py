@@ -850,6 +850,7 @@ with tab3:
         else:
             # Clear previous results during calculation
             st.session_state.verify_results = None
+            st.session_state.feedback_success = None
             
             # 1. Classification Phase
             with st.spinner("Analyzing text and running custom model predictions..."):
@@ -1161,6 +1162,10 @@ with tab3:
         # Continuous learning feedback panel
         st.markdown("---")
         st.markdown("### 📝 Human-in-the-Loop Continuous Feedback")
+        
+        if st.session_state.get("feedback_success"):
+            st.success(st.session_state.feedback_success)
+            
         st.markdown("Help train the models in real-time! If the AI's final combined verdict or individual model predictions are wrong, submit the true label below. The system will perform online learning steps immediately.")
         
         feed_col1, feed_col2 = st.columns([2, 1])
@@ -1281,6 +1286,5 @@ with tab3:
                         res["verdict_bg"] = "rgba(239, 68, 68, 0.15)"
                     
                     st.toast("✅ Models updated instantly in memory and saved to disk!")
-                    st.success("🎉 Correction saved! Model predictions have been refreshed instantly below.")
-                    time.sleep(2.0)
+                    st.session_state.feedback_success = "🎉 Model refined successfully! Real-time predictions refreshed above."
                     st.rerun()
