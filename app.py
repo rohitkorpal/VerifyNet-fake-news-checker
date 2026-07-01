@@ -119,6 +119,16 @@ def get_dataset_statistics():
     df_fake = pd.read_csv("Fake.csv")
     return len(df_true), len(df_fake)
 
+def append_stylistic_features(X_tfidf, raw_texts):
+    """
+    Appends extra columns for uppercase ratio and exclamation mark count to the TF-IDF matrix.
+    Scales them so they have a meaningful influence when compared to 0-1 range TF-IDF weights.
+    """
+    excl = np.array([t.count('!') / (len(t) + 1) for t in raw_texts]).reshape(-1, 1)
+    upper = np.array([sum(1 for c in t if c.isupper()) / (len(t) + 1) for t in raw_texts]).reshape(-1, 1)
+    # Scale by 10 to give these features proportional representation in the sparse space
+    return np.hstack((X_tfidf, excl * 10.0, upper * 10.0))
+
 @st.cache_data(show_spinner=False)
 def load_and_preprocess_subset(sample_size, vocab_size):
     """
@@ -147,7 +157,8 @@ def load_and_preprocess_subset(sample_size, vocab_size):
     
     # Custom Vectorizer
     vectorizer = CustomTfidfVectorizer(max_features=vocab_size)
-    X = vectorizer.fit_transform(clean_texts)
+    X_tfidf = vectorizer.fit_transform(clean_texts)
+    X = append_stylistic_features(X_tfidf, texts)
     
     return X, labels, vectorizer, clean_texts, df_all
 
@@ -196,9 +207,19 @@ def load_models_from_disk():
         return None
 
 def fetch_live_news(query, api_key):
-    url = f"https://newsapi.org/v2/everything?q={query}&apiKey={api_key}&language=en&pageSize=5"
+    # Enforce strict search: prefix each word with '+' so NewsAPI requires all terms to be present
+    words = [w.strip() for w in query.strip().split() if w.strip()]
+    strict_query = " ".join([f"+{w}" for w in words]) if words else query
+    
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "q": strict_query,
+        "apiKey": api_key,
+        "language": "en",
+        "pageSize": 5
+    }
     try:
-        response = requests.get(url)
+        response = requests.get(url, params=params, timeout=10)
         if response.status_code == 200:
             return response.json().get("articles", [])
         else:
@@ -207,9 +228,18 @@ def fetch_live_news(query, api_key):
         return None
 
 def fetch_newsdata_io(query, api_key):
-    url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={query}&language=en"
+    # Enforce strict search: join terms with 'AND'
+    words = [w.strip() for w in query.strip().split() if w.strip()]
+    strict_query = " AND ".join(words) if words else query
+    
+    url = "https://newsdata.io/api/1/news"
+    params = {
+        "apikey": api_key,
+        "q": strict_query,
+        "language": "en"
+    }
     try:
-        response = requests.get(url)
+        response = requests.get(url, params=params, timeout=10)
         if response.status_code == 200:
             return response.json().get("results", [])[:5]
         else:
@@ -435,12 +465,26 @@ with st.sidebar.expander("Simple Neural Net Parameters"):
     nn_epochs = st.slider("NN Epochs", 10, 300, 100, step=10)
     nn_batch = st.select_slider("Batch Size", options=[8, 16, 32, 64, 128], value=32)
 
+# Validate trained model feature shape integrity
+is_compatible = True
+if st.session_state.trained:
+    trained_vocab_size = len(st.session_state.vectorizer.vocabulary_)
+    expected_features = trained_vocab_size + 2
+    
+    # Check weight dimensions
+    if hasattr(st.session_state.log_reg, "weights") and st.session_state.log_reg.weights is not None:
+        if st.session_state.log_reg.weights.shape[0] != expected_features:
+            is_compatible = False
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 💾 Pre-trained Models Status")
-if st.session_state.trained:
+if st.session_state.trained and is_compatible:
     st.sidebar.success("🟢 Ready (Models loaded)")
 else:
-    st.sidebar.warning("⚠️ Retraining required (No models loaded)")
+    if st.session_state.trained and not is_compatible:
+        st.sidebar.warning("⚠️ Retraining required (Feature dimension mismatch)")
+    else:
+        st.sidebar.warning("⚠️ Retraining required (No models loaded)")
 st.sidebar.markdown("---")
 train_trigger = st.sidebar.button("🚀 Train All Models", use_container_width=True)
 
@@ -517,9 +561,9 @@ with tab1:
         
     with col_chart2:
         st.markdown("#### Top 10 Most Common Words in Vocabulary")
-        # Sum columns of word counts (from Count matrix equivalent)
-        word_frequencies = np.sum(X_eda, axis=0)
         vocab = vectorizer_eda.feature_names_
+        # Sum columns of word counts (excluding appended stylistic features)
+        word_frequencies = np.sum(X_eda[:, :len(vocab)], axis=0)
         
         freq_df = pd.DataFrame({'word': vocab, 'tf_idf_weight': word_frequencies}).sort_values(by='tf_idf_weight', ascending=False).head(10)
         
@@ -548,6 +592,7 @@ with tab1:
 with tab2:
     if train_trigger or st.session_state.trained:
         if train_trigger:
+            st.cache_data.clear()  # Clear streamlit cache to invalidate old shapes
             with st.spinner("⏳ Loading dataset, cleaning text, and building TF-IDF vectors from scratch..."):
                 X, y, vectorizer, clean_texts, df_sampled = load_and_preprocess_subset(sample_size, vocab_size)
                 
@@ -625,6 +670,9 @@ with tab2:
                 
                 # Save to disk for persistence across restarts
                 save_models_to_disk(vectorizer, knn, log_reg, rf, nn, metrics)
+                
+                # Force immediate rerun to refresh the sidebar status
+                st.rerun()
                 
         metrics = st.session_state.metrics
         
@@ -757,12 +805,15 @@ with tab3:
     st.markdown("### 🔮 Verify News & Search Live Coverage")
     st.markdown("Paste a news headline or article body below. The system will classify the text using our trained models and automatically search both **NewsAPI** and **NewsData.io** to retrieve matching live news reports to support the model's decision.")
 
+    # Initialize session state for news input if not present
+    if "news_input_area" not in st.session_state:
+        st.session_state.news_input_area = ""
+
     # Load example buttons
-    example_text = ""
     col_ex1, col_ex2 = st.columns(2)
     with col_ex1:
         if st.button("📰 Load Real News Example", use_container_width=True):
-            example_text = (
+            st.session_state.news_input_area = (
                 "WASHINGTON (Reuters) - The U.S. Senate approved a sweeping tax reform bill early Saturday morning, "
                 "marking a major legislative victory for President Donald Trump. The Republican-led chamber passed the bill "
                 "51-49, following a marathon late-night session. The bill represents the largest overhaul of the U.S. tax code "
@@ -770,14 +821,14 @@ with tab3:
             )
     with col_ex2:
         if st.button("🚨 Load Fake News Example", use_container_width=True):
-            example_text = (
+            st.session_state.news_input_area = (
                 "BREAKING: Pope Francis has shocked the world today by endorsing Donald Trump for President. "
                 "In a statement released by the Vatican, the Pope declared that Donald Trump is the only logical choice "
                 "to lead the free world, praising his stances on border control and economic expansion. The statement has "
                 "ignited a massive controversy across global religious organizations."
             )
 
-    news_input = st.text_area("News text to verify:", value=example_text, height=180, 
+    news_input = st.text_area("News text to verify:", key="news_input_area", height=180, 
                              placeholder="Enter headline or article paragraph here...")
 
     # Load API keys silently from .env
@@ -787,15 +838,16 @@ with tab3:
     verify_trigger = st.button("🔍 Verify Article & Search Live Coverage", use_container_width=True)
 
     if verify_trigger:
-        if not st.session_state.trained:
-            st.error("⚠️ Please train the models first using Tab 2 or the sidebar button!")
+        if not st.session_state.trained or not is_compatible:
+            st.error("⚠️ Please train the models first using Tab 2 or the sidebar button to align model features!")
         elif not news_input.strip():
             st.warning("⚠️ Please enter some news text to verify.")
         else:
             # 1. Classification Phase
             with st.spinner("Analyzing text and running custom model predictions..."):
                 clean_input = preprocess_pipeline(news_input)
-                x_input = st.session_state.vectorizer.transform([clean_input])
+                x_tfidf = st.session_state.vectorizer.transform([clean_input])
+                x_input = append_stylistic_features(x_tfidf, [news_input])
 
                 p_knn = st.session_state.knn.predict(x_input)[0]
                 p_log = st.session_state.log_reg.predict(x_input)[0]
