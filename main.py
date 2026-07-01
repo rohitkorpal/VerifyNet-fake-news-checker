@@ -17,11 +17,13 @@ def load_data(sample_size=2000):
     Loads True.csv and Fake.csv, labels them, merges them, and samples them.
     """
     print(f"Loading data...")
-    if not os.path.exists("True.csv") or not os.path.exists("Fake.csv"):
-        raise FileNotFoundError("True.csv and Fake.csv must be in the current directory.")
+    true_path = os.path.join("dataset", "True.csv")
+    fake_path = os.path.join("dataset", "Fake.csv")
+    if not os.path.exists(true_path) or not os.path.exists(fake_path):
+        raise FileNotFoundError("True.csv and Fake.csv must be in the 'dataset' directory.")
         
-    df_true = pd.read_csv("True.csv")
-    df_fake = pd.read_csv("Fake.csv")
+    df_true = pd.read_csv(true_path)
+    df_fake = pd.read_csv(fake_path)
     
     print(f"  Found {len(df_true)} Real and {len(df_fake)} Fake articles.")
     

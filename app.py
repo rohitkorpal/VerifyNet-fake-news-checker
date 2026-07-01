@@ -113,10 +113,12 @@ def get_dataset_statistics():
     """
     Loads raw CSV files to get exact lengths and descriptions without caching the whole split.
     """
-    if not os.path.exists("True.csv") or not os.path.exists("Fake.csv"):
+    true_path = os.path.join("dataset", "True.csv")
+    fake_path = os.path.join("dataset", "Fake.csv")
+    if not os.path.exists(true_path) or not os.path.exists(fake_path):
         return 0, 0
-    df_true = pd.read_csv("True.csv")
-    df_fake = pd.read_csv("Fake.csv")
+    df_true = pd.read_csv(true_path)
+    df_fake = pd.read_csv(fake_path)
     return len(df_true), len(df_fake)
 
 def append_stylistic_features(X_tfidf, raw_texts):
@@ -133,9 +135,13 @@ def append_stylistic_features(X_tfidf, raw_texts):
 def load_and_preprocess_subset(sample_size, vocab_size):
     """
     Loads, samples, and preprocesses a balanced subset of news.
+    Appends accumulated user feedback from user_feedback.csv to ensure
+    all models (including Random Forest) train on past corrections.
     """
-    df_true = pd.read_csv("True.csv")
-    df_fake = pd.read_csv("Fake.csv")
+    true_path = os.path.join("dataset", "True.csv")
+    fake_path = os.path.join("dataset", "Fake.csv")
+    df_true = pd.read_csv(true_path)
+    df_fake = pd.read_csv(fake_path)
     
     half_sample = sample_size // 2
     
@@ -146,7 +152,24 @@ def load_and_preprocess_subset(sample_size, vocab_size):
     df_t['label'] = 0
     df_f['label'] = 1
     
-    df_all = pd.concat([df_t, df_f], ignore_index=True)
+    df_all_list = [df_t, df_f]
+    
+    # Load feedback corrections if available
+    feedback_file = os.path.join("dataset", "user_feedback.csv")
+    if os.path.exists(feedback_file):
+        try:
+            df_fb = pd.read_csv(feedback_file)
+            if not df_fb.empty and "raw_text" in df_fb.columns and "submitted_truth" in df_fb.columns:
+                # Map column names to match main dataframe schema
+                df_fb_subset = pd.DataFrame({
+                    "text": df_fb["raw_text"].fillna(""),
+                    "label": df_fb["submitted_truth"].astype(int)
+                })
+                df_all_list.append(df_fb_subset)
+        except Exception:
+            pass
+            
+    df_all = pd.concat(df_all_list, ignore_index=True)
     df_all = df_all.sample(frac=1, random_state=42).reset_index(drop=True)
     
     # Preprocess
@@ -287,19 +310,29 @@ def extract_query_with_gemini(text):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 50}
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 300}
         }
         
         try:
             resp = requests.post(url, json=payload, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
-                query = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                query = query.strip('"').strip("'").strip()
-                # Reject responses with fewer than 3 words — too generic for meaningful search
-                if query and len(query.split()) >= 3:
-                    return query
-        except Exception:
+                candidates = data.get("candidates", [])
+                if candidates:
+                    content = candidates[0].get("content", {})
+                    parts = content.get("parts", [])
+                    if parts and "text" in parts[0]:
+                        query = parts[0]["text"].strip()
+                        query = query.strip('"').strip("'").strip()
+                        # Reject responses with fewer than 3 words — too generic for meaningful search
+                        if query and len(query.split()) >= 3:
+                            return query
+            else:
+                with open("debug.log", "a") as f:
+                    f.write(f"Gemini extract_query returned non-200: {resp.status_code}, body: {resp.text}\n")
+        except Exception as e:
+            with open("debug.log", "a") as f:
+                f.write(f"Gemini extract_query exception: {str(e)}\n")
             continue
     
     return _fallback_query(text)
@@ -334,35 +367,65 @@ def gemini_fact_check(text, search_query="", coverage_text=""):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 150}
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 800}
         }
         
         try:
             resp = requests.post(url, json=payload, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
-                response_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                
-                # Parse the structured response
-                result = {"verdict": "UNKNOWN", "confidence": 50, "reasoning": "Unable to analyze."}
-                
-                for line in response_text.split('\n'):
-                    line = line.strip()
-                    if line.upper().startswith("VERDICT:"):
-                        v = line.split(":", 1)[1].strip().upper()
-                        result["verdict"] = "FAKE" if "FAKE" in v else "REAL"
-                    elif line.upper().startswith("CONFIDENCE:"):
-                        try:
-                            result["confidence"] = int(''.join(filter(str.isdigit, line.split(":", 1)[1].strip()))[:3])
-                        except (ValueError, IndexError):
-                            pass
-                    elif line.upper().startswith("REASONING:"):
-                        result["reasoning"] = line.split(":", 1)[1].strip()
-                
-                return result
-        except Exception:
+                candidates = data.get("candidates", [])
+                if candidates:
+                    candidate = candidates[0]
+                    content = candidate.get("content", {})
+                    parts = content.get("parts", [])
+                    if parts and "text" in parts[0]:
+                        response_text = parts[0]["text"].strip()
+                        
+                        # Parse the structured response
+                        result = {"verdict": "UNKNOWN", "confidence": 50, "reasoning": "Unable to analyze."}
+                        
+                        for line in response_text.split('\n'):
+                            line = line.strip()
+                            if line.upper().startswith("VERDICT:"):
+                                v = line.split(":", 1)[1].strip().upper()
+                                if "FAKE" in v:
+                                    result["verdict"] = "FAKE"
+                                elif "REAL" in v:
+                                    result["verdict"] = "REAL"
+                                else:
+                                    result["verdict"] = "UNKNOWN"
+                            elif line.upper().startswith("CONFIDENCE:"):
+                                try:
+                                    result["confidence"] = int(''.join(filter(str.isdigit, line.split(":", 1)[1].strip()))[:3])
+                                except (ValueError, IndexError):
+                                    pass
+                            elif line.upper().startswith("REASONING:"):
+                                result["reasoning"] = line.split(":", 1)[1].strip()
+                        
+                        return result
+                    else:
+                        finish_reason = candidate.get("finishReason", "UNKNOWN")
+                        with open("debug.log", "a") as f:
+                            f.write(f"Gemini candidate content empty. finishReason: {finish_reason}\n")
+                        if finish_reason == "SAFETY":
+                            return {
+                                "verdict": "UNKNOWN",
+                                "confidence": 50,
+                                "reasoning": "Gemini analysis was blocked by safety filters due to sensitive content."
+                            }
+                else:
+                    with open("debug.log", "a") as f:
+                        f.write("Gemini returned empty candidates list.\n")
+            else:
+                with open("debug.log", "a") as f:
+                    f.write(f"Gemini API returned non-200 status code: {resp.status_code}, body: {resp.text}\n")
+        except Exception as e:
+            import traceback
+            with open("debug.log", "a") as f:
+                f.write(f"Gemini request exception for model {model}: {str(e)}\n{traceback.format_exc()}\n")
             continue
-    
+            
     return None
 
 def _fallback_query(text):
@@ -427,8 +490,10 @@ st.markdown("<h1 class='main-title'>📰 AI-Powered Fake News Detector</h1>", un
 st.markdown("<p class='sub-title'>A Complete Machine Learning Pipeline Implemented From Scratch</p>", unsafe_allow_html=True)
 
 # Check for files
-if not os.path.exists("True.csv") or not os.path.exists("Fake.csv"):
-    st.error("⚠️ Dataset files (True.csv and Fake.csv) not found in the current folder. Please verify the environment.")
+true_path = os.path.join("dataset", "True.csv")
+fake_path = os.path.join("dataset", "Fake.csv")
+if not os.path.exists(true_path) or not os.path.exists(fake_path):
+    st.error("⚠️ Dataset files (True.csv and Fake.csv) not found in the 'dataset' folder. Please verify the environment.")
     st.stop()
 
 # Sidebar: Hyperparameters and Settings
@@ -821,6 +886,10 @@ with tab2:
 
 # TAB 3: LIVE PREDICTOR
 with tab3:
+    if "show_toast" in st.session_state and st.session_state.show_toast:
+        st.toast(st.session_state.show_toast)
+        st.session_state.show_toast = None
+
     st.markdown("### 🔮 Verify News & Search Live Coverage")
     st.markdown("Paste a news headline or article body below. The system will classify the text using our trained models and automatically search both **NewsAPI** and **NewsData.io** to retrieve matching live news reports to support the model's decision.")
 
@@ -1009,7 +1078,9 @@ with tab3:
                 "model_verdict": model_verdict,
                 "model_confidence": model_confidence,
                 "fake_votes": fake_votes,
-                "real_votes": real_votes
+                "real_votes": real_votes,
+                "k_neighbors": st.session_state.knn.k,
+                "rf_trees": st.session_state.rf.n_estimators
             }
             # Force rerun to display immediately
             st.rerun()
@@ -1034,7 +1105,7 @@ with tab3:
             <div class='{cls_knn}'>
                 <div class='card-title'>K-Nearest Neighbors</div>
                 <h2 style='margin:0;'>{lbl_knn}</h2>
-                <div style='font-size:0.85rem; opacity:0.85;'>Based on k={k_neighbors} closest articles</div>
+                <div style='font-size:0.85rem; opacity:0.85;'>Based on k={res.get('k_neighbors', 5)} closest articles</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -1044,7 +1115,7 @@ with tab3:
             <div class='{cls_rf}'>
                 <div class='card-title'>Random Forest</div>
                 <h2 style='margin:0;'>{lbl_rf}</h2>
-                <div style='font-size:0.85rem; opacity:0.85;'>Aggregated vote from {rf_trees} decision trees</div>
+                <div style='font-size:0.85rem; opacity:0.85;'>Aggregated vote from {res.get('rf_trees', 10)} decision trees</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -1225,12 +1296,12 @@ with tab3:
                     # Note: Random Forest cannot be fitted incrementally without full rebuild, so we leave it unchanged.
                     
                     # Log to CSV
-                    feedback_file = "user_feedback.csv"
+                    feedback_file = os.path.join("dataset", "user_feedback.csv")
                     feedback_df = pd.DataFrame([{
                         "timestamp": pd.Timestamp.now().isoformat(),
                         "text_length": len(last_text),
                         "submitted_truth": label_val,
-                        "clean_text": clean_fb[:200]
+                        "raw_text": last_text
                     }])
                     if not os.path.exists(feedback_file):
                         feedback_df.to_csv(feedback_file, index=False)
@@ -1264,6 +1335,8 @@ with tab3:
                     res["p_nn"] = p_nn
                     res["prob_log"] = prob_log
                     res["prob_nn"] = prob_nn
+                    res["k_neighbors"] = st.session_state.knn.k
+                    res["rf_trees"] = st.session_state.rf.n_estimators
                     
                     # Recalculate combined models consensus
                     predictions = [p_knn, p_log, p_rf, p_nn]
@@ -1303,6 +1376,6 @@ with tab3:
                         res["verdict_emoji"] = "🔴"
                         res["verdict_bg"] = "rgba(239, 68, 68, 0.15)"
                     
-                    st.toast("✅ Models updated instantly in memory and saved to disk!")
+                    st.session_state.show_toast = "✅ Models updated instantly in memory and saved to disk!"
                     st.session_state.feedback_success = "🎉 Model refined successfully! Real-time predictions refreshed above."
                     st.rerun()
