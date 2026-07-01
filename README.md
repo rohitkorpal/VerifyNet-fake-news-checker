@@ -1,3 +1,5 @@
+<img width="1500" height="772" alt="image" src="https://github.com/user-attachments/assets/ffd54bec-55d6-46fc-9ed0-c965163ed7ea" />
+
 # 📰 AI-Powered Fake News Detector (From Scratch)
 
 This repository contains a complete, production-grade Machine Learning pipeline and interactive web application for classifying news articles as **Real** or **Fake**. Every single core component—from raw text cleaning, tokenization, and TF-IDF feature extraction, to four distinct classification algorithms and metric evaluation utilities—has been built **entirely from scratch** using only Python, **NumPy**, and **Pandas** (without relying on `scikit-learn` or `nltk` for modeling).
