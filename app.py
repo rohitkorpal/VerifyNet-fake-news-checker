@@ -985,7 +985,7 @@ with tab3:
     counter_color = "#94A3B8" if remaining > 50 else "#EF4444"
     st.markdown(
         f"<div style='text-align: right; font-size: 0.85rem; color: {counter_color}; font-weight: bold; margin-bottom: 2px;'>"
-        f"📝 Characters remaining: {remaining} / 600"
+        f"📝 Characters Entered : {remaining}"
         f"</div>", 
         unsafe_allow_html=True
     )
