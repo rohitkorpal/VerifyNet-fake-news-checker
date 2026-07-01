@@ -1,1 +1,0 @@
-Gemini extract_query exception: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Read timed out. (read timeout=10)
