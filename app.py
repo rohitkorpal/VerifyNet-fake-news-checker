@@ -630,7 +630,12 @@ with tab2:
                 nn.fit(X_train, y_train)
                 t_nn = time.time() - t0
                 
-                # Test evaluations
+                # Train and Test evaluations
+                train_preds_knn = knn.predict(X_train)
+                train_preds_log = log_reg.predict(X_train)
+                train_preds_rf = rf.predict(X_train)
+                train_preds_nn = nn.predict(X_train)
+
                 preds_knn = knn.predict(X_test)
                 preds_log = log_reg.predict(X_test)
                 preds_rf = rf.predict(X_test)
@@ -638,20 +643,22 @@ with tab2:
                 
                 # Compute metrics
                 metrics = {}
-                for name, preds, t_train, model in [
-                    ("KNN", preds_knn, t_knn, knn),
-                    ("Logistic Regression", preds_log, t_log, log_reg),
-                    ("Random Forest", preds_rf, t_rf, rf),
-                    ("Simple Neural Network", preds_nn, t_nn, nn)
+                for name, preds, train_preds, t_train, model in [
+                    ("KNN", preds_knn, train_preds_knn, t_knn, knn),
+                    ("Logistic Regression", preds_log, train_preds_log, t_log, log_reg),
+                    ("Random Forest", preds_rf, train_preds_rf, t_rf, rf),
+                    ("Simple Neural Network", preds_nn, train_preds_nn, t_nn, nn)
                 ]:
-                    acc = accuracy_score_scratch(y_test, preds)
+                    acc_train = accuracy_score_scratch(y_train, train_preds)
+                    acc_test = accuracy_score_scratch(y_test, preds)
                     prec = precision_score_scratch(y_test, preds)
                     rec = recall_score_scratch(y_test, preds)
                     f1 = f1_score_scratch(y_test, preds)
                     tp, fp, tn, fn, mat = confusion_matrix_scratch(y_test, preds)
                     
                     metrics[name] = {
-                        'accuracy': acc,
+                        'train_accuracy': acc_train,
+                        'accuracy': acc_test,
                         'precision': prec,
                         'recall': rec,
                         'f1': f1,
@@ -684,7 +691,8 @@ with tab2:
         
         compare_data = {
             "Model Name": list(metrics.keys()),
-            "Accuracy": [metrics[m]['accuracy'] for m in metrics],
+            "Train Accuracy": [metrics[m].get('train_accuracy', 0.0) for m in metrics],
+            "Test Accuracy": [metrics[m]['accuracy'] for m in metrics],
             "Precision": [metrics[m]['precision'] for m in metrics],
             "Recall": [metrics[m]['recall'] for m in metrics],
             "F1-Score": [metrics[m]['f1'] for m in metrics],
@@ -694,7 +702,8 @@ with tab2:
         compare_df = pd.DataFrame(compare_data)
         st.dataframe(
             compare_df.style.format({
-                'Accuracy': '{:.2%}',
+                'Train Accuracy': '{:.2%}',
+                'Test Accuracy': '{:.2%}',
                 'Precision': '{:.2%}',
                 'Recall': '{:.2%}',
                 'F1-Score': '{:.2%}',
@@ -709,12 +718,21 @@ with tab2:
         ax_acc.set_facecolor('#1E293B')
         ax_time.set_facecolor('#1E293B')
         
+        # Melt dataframe to compare Train vs. Test Accuracy side-by-side
+        melted_acc = compare_df.melt(
+            id_vars="Model Name",
+            value_vars=["Train Accuracy", "Test Accuracy"],
+            var_name="Split",
+            value_name="Accuracy"
+        )
+        
         # Accuracy comparison
-        sns.barplot(x="Accuracy", y="Model Name", data=compare_df, palette="coolwarm", ax=ax_acc)
+        sns.barplot(x="Accuracy", y="Model Name", hue="Split", data=melted_acc, palette="coolwarm", ax=ax_acc)
         ax_acc.set_xlim(0, 1.05)
-        ax_acc.set_title("Test Accuracy Comparison", color="#F8FAFC", fontsize=12)
+        ax_acc.set_title("Train vs. Test Accuracy Comparison", color="#F8FAFC", fontsize=12)
         ax_acc.set_xlabel("Accuracy", color="#F8FAFC")
         ax_acc.set_ylabel("", color="#F8FAFC")
+        ax_acc.legend(facecolor='#1E293B', edgecolor='#334155', labelcolor='#F8FAFC')
         ax_acc.tick_params(colors="#F8FAFC")
         for spine in ax_acc.spines.values():
             spine.set_color('#334155')
