@@ -120,3 +120,34 @@ class LogisticRegressionClassifier(BaseModel):
         """
         probs = self.predict_proba(X)
         return (probs >= threshold).astype(int)
+
+    def partial_fit(self, X, y, lr=None):
+        """
+        Performs a single incremental training step (online learning) on a new batch/sample.
+        """
+        if self.weights is None:
+            # Initialize if not already fitted
+            self.weights = np.zeros((X.shape[1], 1))
+            self.bias = 0.0
+            
+        X = np.array(X)
+        y = np.array(y).reshape(-1, 1)
+        
+        step_lr = lr if lr is not None else self.lr
+        
+        # Forward pass
+        z = np.dot(X, self.weights) + self.bias
+        y_pred = self._sigmoid(z)
+        
+        # Calculate error
+        error = y_pred - y
+        
+        # Gradients
+        m = X.shape[0]
+        dw = (1 / m) * np.dot(X.T, error) + (self.lambda_reg / m) * self.weights
+        db = (1 / m) * np.sum(error)
+        
+        # Update weights and bias
+        self.weights -= step_lr * dw
+        self.bias -= step_lr * db
+        return self

@@ -304,27 +304,28 @@ def extract_query_with_gemini(text):
     
     return _fallback_query(text)
 
-def gemini_fact_check(text, search_query=""):
-    """Ask Gemini to analyze a news article and determine if it is likely real or fake.
-    Uses headline + extracted keywords instead of full article to save API tokens."""
+def gemini_fact_check(text, search_query="", coverage_text=""):
+    """Ask Gemini to analyze a news article, compare it with retrieved search summaries, 
+    and determine if it is likely real or fake.
+    Uses headline, extracted keywords, and retrieved search text to save API tokens."""
     gemini_key = load_env_api_key("GEMINI_API_KEY")
     if not gemini_key or not text.strip():
         return None
     
     # Build a compact summary: first sentence + keywords (saves ~70% tokens vs full article)
     first_line = text.strip().split('\n')[0].strip()
-    # Take first ~200 chars as headline context
     headline = first_line[:200]
     
     prompt = (
-        "You are an expert fact-checker. Determine if this news is REAL or FAKE.\n\n"
-        "Evaluate: writing style, source credibility, factual plausibility, misinformation patterns.\n\n"
+        "You are an expert fact-checker. Determine if this news is REAL or FAKE.\n"
+        "Evaluate writing style, source credibility, and compare it against the retrieved search results summaries below.\n\n"
         "Respond in EXACTLY this format (3 lines):\n"
         "VERDICT: FAKE or REAL\n"
         "CONFIDENCE: number from 1 to 100\n"
         "REASONING: 2-3 sentence explanation\n\n"
         f"Headline: {headline}\n"
         f"Topic keywords: {search_query}\n"
+        f"Retrieved Search Coverage:\n{coverage_text}\n"
     )
     
     models = ["gemini-2.5-flash", "gemini-flash-lite-latest"]
@@ -837,12 +838,19 @@ with tab3:
 
     verify_trigger = st.button("🔍 Verify Article & Search Live Coverage", use_container_width=True)
 
+    # Initialize session state for news verification results
+    if "verify_results" not in st.session_state:
+        st.session_state.verify_results = None
+
     if verify_trigger:
         if not st.session_state.trained or not is_compatible:
             st.error("⚠️ Please train the models first using Tab 2 or the sidebar button to align model features!")
         elif not news_input.strip():
             st.warning("⚠️ Please enter some news text to verify.")
         else:
+            # Clear previous results during calculation
+            st.session_state.verify_results = None
+            
             # 1. Classification Phase
             with st.spinner("Analyzing text and running custom model predictions..."):
                 clean_input = preprocess_pipeline(news_input)
@@ -856,132 +864,47 @@ with tab3:
 
                 prob_log = st.session_state.log_reg.predict_proba(x_input)[0]
                 prob_nn = st.session_state.nn.predict_proba(x_input)[0]
-
-                st.markdown("### 🏆 Trained Models Decisions")
-                col_pred1, col_pred2 = st.columns(2)
-
-                with col_pred1:
-                    cls_knn = "model-card-fake" if p_knn == 1 else "model-card-real"
-                    lbl_knn = "🚨 FAKE NEWS" if p_knn == 1 else "🟢 REAL NEWS"
-                    st.markdown(f"""
-                    <div class='{cls_knn}'>
-                        <div class='card-title'>K-Nearest Neighbors</div>
-                        <h2 style='margin:0;'>{lbl_knn}</h2>
-                        <div style='font-size:0.85rem; opacity:0.85;'>Based on k={k_neighbors} closest articles</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                    cls_rf = "model-card-fake" if p_rf == 1 else "model-card-real"
-                    lbl_rf = "🚨 FAKE NEWS" if p_rf == 1 else "🟢 REAL NEWS"
-                    st.markdown(f"""
-                    <div class='{cls_rf}'>
-                        <div class='card-title'>Random Forest</div>
-                        <h2 style='margin:0;'>{lbl_rf}</h2>
-                        <div style='font-size:0.85rem; opacity:0.85;'>Aggregated vote from {rf_trees} decision trees</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                with col_pred2:
-                    cls_log = "model-card-fake" if p_log == 1 else "model-card-real"
-                    lbl_log = "🚨 FAKE NEWS" if p_log == 1 else "🟢 REAL NEWS"
-                    pct_log = prob_log if p_log == 1 else (1.0 - prob_log)
-                    st.markdown(f"""
-                    <div class='{cls_log}'>
-                        <div class='card-title'>Logistic Regression</div>
-                        <h2 style='margin:0;'>{lbl_log}</h2>
-                        <div style='font-size:0.85rem; opacity:0.85;'>Confidence probability: {pct_log:.2%}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                    cls_nn = "model-card-fake" if p_nn == 1 else "model-card-real"
-                    lbl_nn = "🚨 FAKE NEWS" if p_nn == 1 else "🟢 REAL NEWS"
-                    pct_nn = prob_nn if p_nn == 1 else (1.0 - prob_nn)
-                    st.markdown(f"""
-                    <div class='{cls_nn}'>
-                        <div class='card-title'>Simple Neural Network</div>
-                        <h2 style='margin:0;'>{lbl_nn}</h2>
-                        <div style='font-size:0.85rem; opacity:0.85;'>Confidence probability: {pct_nn:.2%}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            # 2. Gemini Keyword Extraction Phase
-            st.markdown("---")
-            with st.spinner("🤖 Gemini AI is extracting search keywords from your input..."):
+                
+            # 2. Extract Query
+            with st.spinner("Extracting search keywords from text..."):
                 search_query = extract_query_with_gemini(news_input)
-            
-            st.markdown("### 📡 Live Coverage & Supporting Evidence")
-            st.success(f"🔑 **Gemini Extracted Keywords:** `{search_query}`")
-            st.markdown(f"Searching both news APIs for live coverage matching: **\"{search_query}\"**...")
-
-            col_newsapi, col_newsdata = st.columns(2)
-            
+                
+            # 3. Search Live Coverage
+            raw_api = []
+            raw_data = []
             newsapi_count = 0
             newsdata_count = 0
-
-            # Fetch NewsAPI Results
-            with col_newsapi:
-                st.markdown("#### 📰 NewsAPI Coverage")
-                if not news_api_key:
-                    st.info("⚠️ NewsAPI key is not configured in `.env` file.")
-                else:
-                    with st.spinner("Searching NewsAPI..."):
-                        raw_api = fetch_live_news(search_query, news_api_key)
-                        if raw_api is None:
-                            st.error("❌ Failed to query NewsAPI.")
-                        elif len(raw_api) == 0:
-                            st.warning("🔍 No matching coverage found on NewsAPI.")
-                        else:
-                            newsapi_count = len(raw_api)
-                            for idx, art in enumerate(raw_api):
-                                title = art.get('title', 'No Title')
-                                source = art.get('source', {}).get('name', 'Unknown Source')
-                                url = art.get('url', '#')
-                                desc = art.get('description', '')
-                                date = art.get('publishedAt', '')[:10]
-
-                                st.markdown(f"##### {idx+1}. [{source}] {title}")
-                                st.markdown(f"Published: {date} | [Read full article]({url})")
-                                if desc:
-                                    st.write(desc)
-                                st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
-
-            # Fetch NewsData.io Results
-            with col_newsdata:
-                st.markdown("#### 📡 NewsData.io Coverage")
-                if not newsdata_api_key:
-                    st.info("⚠️ NewsData.io key is not configured in `.env` file.")
-                else:
-                    with st.spinner("Searching NewsData.io..."):
-                        raw_data = fetch_newsdata_io(search_query, newsdata_api_key)
-                        if raw_data is None:
-                            st.error("❌ Failed to query NewsData.io.")
-                        elif len(raw_data) == 0:
-                            st.warning("🔍 No matching coverage found on NewsData.io.")
-                        else:
-                            newsdata_count = len(raw_data)
-                            for idx, art in enumerate(raw_data):
-                                title = art.get('title', 'No Title')
-                                source = art.get('source_id', 'Unknown Source').upper()
-                                url = art.get('link', '#')
-                                desc = art.get('description', '')
-                                date = art.get('pubDate', '')[:10] if art.get('pubDate') else ''
-
-                                pub_str = f"Published: {date} | " if date else ""
-                                st.markdown(f"##### {idx+1}. [{source}] {title}")
-                                st.markdown(f"{pub_str}[Read full article]({url})")
-                                if desc:
-                                    st.write(desc)
-                                st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
-
-            # ============================================================
-            # 3. UNIFIED AI VERDICT — Combining all signals
-            # ============================================================
-            st.markdown("---")
-            st.markdown("### 🧠 Unified AI Verdict")
+            
+            if news_api_key:
+                raw_api = fetch_live_news(search_query, news_api_key) or []
+                newsapi_count = len(raw_api)
+                
+            if newsdata_api_key:
+                raw_data = fetch_newsdata_io(search_query, newsdata_api_key) or []
+                newsdata_count = len(raw_data)
+                
+            total_sources = newsapi_count + newsdata_count
+            
+            # Construct a clean text summary of the live news coverage to pass to Gemini
+            coverage_items = []
+            if raw_api:
+                for art in raw_api[:3]:
+                    title = art.get('title', 'No Title')
+                    source = art.get('source', {}).get('name', 'Unknown')
+                    desc = art.get('description', '') or ''
+                    coverage_items.append(f"- [{source}] {title}: {desc[:150]}")
+            if raw_data:
+                for art in raw_data[:3]:
+                    title = art.get('title', 'No Title')
+                    source = art.get('source_id', 'Unknown').upper()
+                    desc = art.get('description', '') or ''
+                    coverage_items.append(f"- [{source}] {title}: {desc[:150]}")
+            
+            coverage_text = "\n".join(coverage_items) if coverage_items else "No live news coverage found."
             
             with st.spinner("🤖 Gemini AI is analyzing the article for fact-checking..."):
-                gemini_result = gemini_fact_check(news_input, search_query)
-            
+                gemini_result = gemini_fact_check(news_input, search_query, coverage_text)
+                
             # Signal 1: ML Model Ensemble Vote
             predictions = [p_knn, p_log, p_rf, p_nn]
             fake_votes = sum(predictions)
@@ -990,14 +913,15 @@ with tab3:
             model_confidence = max(fake_votes, real_votes) / 4.0 * 100
             
             # Signal 2: Cross-Reference Score (more sources = more likely real)
-            total_sources = newsapi_count + newsdata_count
             if total_sources >= 5:
-                cross_ref_score = 80  # Well covered — likely real
+                cross_ref_score = 100  # Well covered — likely real
             elif total_sources >= 2:
-                cross_ref_score = 50  # Some coverage
+                cross_ref_score = 60   # Some coverage
+            elif total_sources == 1:
+                cross_ref_score = 30   # Minimal coverage
             else:
-                cross_ref_score = 20  # No/minimal coverage — suspicious
-            
+                cross_ref_score = 0    # No coverage — suspicious
+                
             # Signal 3: Gemini AI Verdict
             gemini_verdict = "UNKNOWN"
             gemini_confidence = 50
@@ -1006,13 +930,19 @@ with tab3:
                 gemini_verdict = gemini_result["verdict"]
                 gemini_confidence = gemini_result["confidence"]
                 gemini_reasoning = gemini_result["reasoning"]
-            
+                
             # Final Weighted Credibility Score
-            # Weights: ML Models = 35%, Cross-Reference = 25%, Gemini AI = 40%
-            model_score = (real_votes / 4.0) * 100  # 0 = all say fake, 100 = all say real
+            model_score = (real_votes / 4.0) * 100
             gemini_score = gemini_confidence if gemini_verdict == "REAL" else (100 - gemini_confidence)
             
-            final_credibility = int(model_score * 0.35 + cross_ref_score * 0.25 + gemini_score * 0.40)
+            final_credibility = int(model_score * 0.20 + cross_ref_score * 0.40 + gemini_score * 0.40)
+            
+            # --- REAL-TIME OVERRIDE RULE ---
+            override_applied = False
+            if total_sources == 0:
+                final_credibility = min(20, final_credibility)
+                override_applied = True
+                
             final_credibility = max(0, min(100, final_credibility))
             
             if final_credibility >= 60:
@@ -1030,56 +960,327 @@ with tab3:
                 verdict_color = "#EF4444"
                 verdict_emoji = "🔴"
                 verdict_bg = "rgba(239, 68, 68, 0.15)"
+                
+            # Save results dictionary in session state
+            st.session_state.verify_results = {
+                "news_input": news_input,
+                "p_knn": p_knn,
+                "p_log": p_log,
+                "p_rf": p_rf,
+                "p_nn": p_nn,
+                "prob_log": prob_log,
+                "prob_nn": prob_nn,
+                "search_query": search_query,
+                "raw_api": raw_api,
+                "raw_data": raw_data,
+                "newsapi_count": newsapi_count,
+                "newsdata_count": newsdata_count,
+                "gemini_result": gemini_result,
+                "total_sources": total_sources,
+                "cross_ref_score": cross_ref_score,
+                "gemini_verdict": gemini_verdict,
+                "gemini_confidence": gemini_confidence,
+                "gemini_reasoning": gemini_reasoning,
+                "final_credibility": final_credibility,
+                "override_applied": override_applied,
+                "final_verdict": final_verdict,
+                "verdict_color": verdict_color,
+                "verdict_emoji": verdict_emoji,
+                "verdict_bg": verdict_bg,
+                "model_verdict": model_verdict,
+                "model_confidence": model_confidence,
+                "fake_votes": fake_votes,
+                "real_votes": real_votes
+            }
+            # Force rerun to display immediately
+            st.rerun()
+
+    # --- RENDER STAGE (OUTSIDE VERIFY TRIGGER) ---
+    if st.session_state.verify_results is not None:
+        # Check for changes in input area to avoid showing stale results
+        if st.session_state.verify_results["news_input"] != news_input:
+            st.session_state.verify_results = None
+            st.rerun()
             
-            # Display the 3 signals side-by-side
-            sig1, sig2, sig3 = st.columns(3)
-            
-            with sig1:
-                st.markdown(f"""
-                <div style='background: rgba(99, 102, 241, 0.15); border: 1px solid #6366F1; border-radius: 12px; padding: 16px; text-align: center;'>
-                    <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>📊 ML Models ({fake_votes}/4 say Fake)</div>
-                    <h3 style='margin: 0; color: {"#EF4444" if model_verdict == "FAKE" else "#10B981"};'>{"🔴 FAKE" if model_verdict == "FAKE" else "🟢 REAL"}</h3>
-                    <div style='font-size: 0.8rem; opacity: 0.7;'>Confidence: {model_confidence:.0f}%</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with sig2:
-                src_label = f"{total_sources} sources found" if total_sources > 0 else "No sources found"
-                st.markdown(f"""
-                <div style='background: rgba(99, 102, 241, 0.15); border: 1px solid #6366F1; border-radius: 12px; padding: 16px; text-align: center;'>
-                    <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>🔍 Cross-Reference ({src_label})</div>
-                    <h3 style='margin: 0; color: {"#10B981" if cross_ref_score >= 50 else "#EF4444"};'>{"✅ Covered" if total_sources >= 2 else "⚠️ Not Covered"}</h3>
-                    <div style='font-size: 0.8rem; opacity: 0.7;'>Score: {cross_ref_score}/100</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with sig3:
-                st.markdown(f"""
-                <div style='background: rgba(99, 102, 241, 0.15); border: 1px solid #6366F1; border-radius: 12px; padding: 16px; text-align: center;'>
-                    <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>🤖 Gemini AI Analysis</div>
-                    <h3 style='margin: 0; color: {"#EF4444" if gemini_verdict == "FAKE" else "#10B981" if gemini_verdict == "REAL" else "#F59E0B"};'>{"🔴 FAKE" if gemini_verdict == "FAKE" else "🟢 REAL" if gemini_verdict == "REAL" else "❓ N/A"}</h3>
-                    <div style='font-size: 0.8rem; opacity: 0.7;'>Confidence: {gemini_confidence}%</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Gemini Reasoning
-            if gemini_result:
-                st.markdown(f"""
-                <div style='background: rgba(30, 41, 59, 0.8); border-left: 4px solid #6366F1; padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 12px 0;'>
-                    <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>🤖 Gemini's Reasoning:</div>
-                    <div style='color: #E2E8F0;'>{gemini_reasoning}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Final Verdict Card with Credibility Bar
+        res = st.session_state.verify_results
+        
+        # 1. Models Decisions
+        st.markdown("### 🏆 Trained Models Decisions")
+        col_pred1, col_pred2 = st.columns(2)
+
+        with col_pred1:
+            cls_knn = "model-card-fake" if res["p_knn"] == 1 else "model-card-real"
+            lbl_knn = "🚨 FAKE NEWS" if res["p_knn"] == 1 else "🟢 REAL NEWS"
             st.markdown(f"""
-            <div style='background: {verdict_bg}; border: 2px solid {verdict_color}; border-radius: 16px; padding: 24px; text-align: center; margin-top: 16px;'>
-                <div style='font-size: 1rem; color: #94A3B8; margin-bottom: 8px;'>FINAL COMBINED VERDICT</div>
-                <h1 style='margin: 0; color: {verdict_color}; font-size: 2.2rem;'>{verdict_emoji} {final_verdict}</h1>
-                <div style='font-size: 1.1rem; color: #CBD5E1; margin-top: 8px;'>Credibility Score: <strong style="color: {verdict_color};">{final_credibility}/100</strong></div>
-                <div style='background: #1E293B; border-radius: 10px; height: 20px; margin-top: 12px; overflow: hidden;'>
-                    <div style='background: {verdict_color}; height: 100%; width: {final_credibility}%; border-radius: 10px; transition: width 0.5s;'></div>
-                </div>
-                <div style='font-size: 0.75rem; color: #64748B; margin-top: 8px;'>Weighted: ML Models (35%) + Cross-Reference (25%) + Gemini AI (40%)</div>
+            <div class='{cls_knn}'>
+                <div class='card-title'>K-Nearest Neighbors</div>
+                <h2 style='margin:0;'>{lbl_knn}</h2>
+                <div style='font-size:0.85rem; opacity:0.85;'>Based on k={k_neighbors} closest articles</div>
             </div>
             """, unsafe_allow_html=True)
+
+            cls_rf = "model-card-fake" if res["p_rf"] == 1 else "model-card-real"
+            lbl_rf = "🚨 FAKE NEWS" if res["p_rf"] == 1 else "🟢 REAL NEWS"
+            st.markdown(f"""
+            <div class='{cls_rf}'>
+                <div class='card-title'>Random Forest</div>
+                <h2 style='margin:0;'>{lbl_rf}</h2>
+                <div style='font-size:0.85rem; opacity:0.85;'>Aggregated vote from {rf_trees} decision trees</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_pred2:
+            cls_log = "model-card-fake" if res["p_log"] == 1 else "model-card-real"
+            lbl_log = "🚨 FAKE NEWS" if res["p_log"] == 1 else "🟢 REAL NEWS"
+            pct_log = res["prob_log"] if res["p_log"] == 1 else (1.0 - res["prob_log"])
+            st.markdown(f"""
+            <div class='{cls_log}'>
+                <div class='card-title'>Logistic Regression</div>
+                <h2 style='margin:0;'>{lbl_log}</h2>
+                <div style='font-size:0.85rem; opacity:0.85;'>Confidence probability: {pct_log:.2%}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            cls_nn = "model-card-fake" if res["p_nn"] == 1 else "model-card-real"
+            lbl_nn = "🚨 FAKE NEWS" if res["p_nn"] == 1 else "🟢 REAL NEWS"
+            pct_nn = res["prob_nn"] if res["p_nn"] == 1 else (1.0 - res["prob_nn"])
+            st.markdown(f"""
+            <div class='{cls_nn}'>
+                <div class='card-title'>Simple Neural Network</div>
+                <h2 style='margin:0;'>{lbl_nn}</h2>
+                <div style='font-size:0.85rem; opacity:0.85;'>Confidence probability: {pct_nn:.2%}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # 2. Live Coverage
+        st.markdown("---")
+        st.markdown("### 📡 Live Coverage & Supporting Evidence")
+        st.success(f"🔑 **Gemini Extracted Keywords:** `{res['search_query']}`")
+        st.markdown(f"Searching both news APIs for live coverage matching: **\"{res['search_query']}\"**...")
+
+        col_newsapi, col_newsdata = st.columns(2)
+
+        with col_newsapi:
+            st.markdown("#### 📰 NewsAPI Coverage")
+            if not news_api_key:
+                st.info("⚠️ NewsAPI key is not configured in `.env` file.")
+            elif res["newsapi_count"] == 0:
+                st.warning("🔍 No matching coverage found on NewsAPI.")
+            else:
+                for idx, art in enumerate(res["raw_api"]):
+                    title = art.get('title', 'No Title')
+                    source = art.get('source', {}).get('name', 'Unknown Source')
+                    url = art.get('url', '#')
+                    desc = art.get('description', '')
+                    date = art.get('publishedAt', '')[:10]
+                    st.markdown(f"##### {idx+1}. [{source}] {title}")
+                    st.markdown(f"Published: {date} | [Read full article]({url})")
+                    if desc:
+                        st.write(desc)
+                    st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
+
+        with col_newsdata:
+            st.markdown("#### 📡 NewsData.io Coverage")
+            if not newsdata_api_key:
+                st.info("⚠️ NewsData.io key is not configured in `.env` file.")
+            elif res["newsdata_count"] == 0:
+                st.warning("🔍 No matching coverage found on NewsData.io.")
+            else:
+                for idx, art in enumerate(res["raw_data"]):
+                    title = art.get('title', 'No Title')
+                    source = art.get('source_id', 'Unknown Source').upper()
+                    url = art.get('link', '#')
+                    desc = art.get('description', '')
+                    date = art.get('pubDate', '')[:10] if art.get('pubDate') else ''
+                    pub_str = f"Published: {date} | " if date else ""
+                    st.markdown(f"##### {idx+1}. [{source}] {title}")
+                    st.markdown(f"{pub_str}[Read full article]({url})")
+                    if desc:
+                        st.write(desc)
+                    st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
+
+        # 3. AI Verdict
+        st.markdown("---")
+        st.markdown("### 🧠 Unified AI Verdict")
+
+        sig1, sig2, sig3 = st.columns(3)
+        with sig1:
+            st.markdown(f"""
+            <div style='background: rgba(99, 102, 241, 0.15); border: 1px solid #6366F1; border-radius: 12px; padding: 16px; text-align: center;'>
+                <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>📊 ML Models ({res['fake_votes']}/4 say Fake)</div>
+                <h3 style='margin: 0; color: {"#EF4444" if res["model_verdict"] == "FAKE" else "#10B981"};'>{"🔴 FAKE" if res["model_verdict"] == "FAKE" else "🟢 REAL"}</h3>
+                <div style='font-size: 0.8rem; opacity: 0.7;'>Confidence: {res["model_confidence"]:.0f}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with sig2:
+            src_label = f"{res['total_sources']} sources found" if res["total_sources"] > 0 else "No sources found"
+            st.markdown(f"""
+            <div style='background: rgba(99, 102, 241, 0.15); border: 1px solid #6366F1; border-radius: 12px; padding: 16px; text-align: center;'>
+                <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>🔍 Cross-Reference ({src_label})</div>
+                <h3 style='margin: 0; color: {"#10B981" if res["cross_ref_score"] >= 50 else "#EF4444"};'>{"✅ Covered" if res["total_sources"] >= 2 else "⚠️ Not Covered"}</h3>
+                <div style='font-size: 0.8rem; opacity: 0.7;'>Score: {res["cross_ref_score"]}/100</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with sig3:
+            st.markdown(f"""
+            <div style='background: rgba(99, 102, 241, 0.15); border: 1px solid #6366F1; border-radius: 12px; padding: 16px; text-align: center;'>
+                <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>🤖 Gemini AI Analysis</div>
+                <h3 style='margin: 0; color: {"#EF4444" if res["gemini_verdict"] == "FAKE" else "#10B981" if res["gemini_verdict"] == "REAL" else "#F59E0B"};'>{"🔴 FAKE" if res["gemini_verdict"] == "FAKE" else "🟢 REAL" if res["gemini_verdict"] == "REAL" else "❓ N/A"}</h3>
+                <div style='font-size: 0.8rem; opacity: 0.7;'>Confidence: {res["gemini_confidence"]}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        if res["gemini_result"]:
+            st.markdown(f"""
+            <div style='background: rgba(30, 41, 59, 0.8); border-left: 4px solid #6366F1; padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 12px 0;'>
+                <div style='font-size: 0.8rem; color: #A5B4FC; margin-bottom: 4px;'>🤖 Gemini's Reasoning:</div>
+                <div style='color: #E2E8F0;'>{res["gemini_reasoning"]}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        override_warning_html = ""
+        if res["override_applied"]:
+            override_warning_html = "<div style='color: #FCA5A5; font-size: 0.85rem; margin-top: 10px; font-weight: bold;'>⚠️ Capped credibility at 20% because NO matching real-time news articles were found. Prevents style-based false positives.</div>"
+
+        st.markdown(
+            f"<div style='background: {res['verdict_bg']}; border: 2px solid {res['verdict_color']}; border-radius: 16px; padding: 24px; text-align: center; margin-top: 16px;'>"
+            f"<div style='font-size: 1rem; color: #94A3B8; margin-bottom: 8px;'>FINAL COMBINED VERDICT</div>"
+            f"<h1 style='margin: 0; color: {res['verdict_color']}; font-size: 2.2rem;'>{res['verdict_emoji']} {res['final_verdict']}</h1>"
+            f"<div style='font-size: 1.1rem; color: #CBD5E1; margin-top: 8px;'>Credibility Score: <strong style=\"color: {res['verdict_color']};\">{res['final_credibility']}/100</strong></div>"
+            f"<div style='background: #1E293B; border-radius: 10px; height: 20px; margin-top: 12px; overflow: hidden;'>"
+            f"<div style='background: {res['verdict_color']}; height: 100%; width: {res['final_credibility']}%; border-radius: 10px; transition: width 0.5s;'></div>"
+            f"</div>"
+            f"{override_warning_html}"
+            f"<div style='font-size: 0.75rem; color: #64748B; margin-top: 12px;'>Weighted: ML Models (20%) + Cross-Reference (40%) + Gemini AI (40%)</div>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+        # Continuous learning feedback panel
+        st.markdown("---")
+        st.markdown("### 📝 Human-in-the-Loop Continuous Feedback")
+        st.markdown("Help train the models in real-time! If the AI's final combined verdict or individual model predictions are wrong, submit the true label below. The system will perform online learning steps immediately.")
+        
+        feed_col1, feed_col2 = st.columns([2, 1])
+        with feed_col1:
+            true_label_choice = st.radio(
+                "What is the actual ground truth for this article?",
+                options=["Real News", "Fake News"],
+                horizontal=True,
+                key="feedback_radio"
+            )
+        with feed_col2:
+            st.write("") # Vertical offset spacing
+            submit_feedback = st.button("💾 Submit & Train Instantly", use_container_width=True)
+
+        if submit_feedback:
+            last_text = news_input.strip()
+            if not last_text:
+                st.warning("⚠️ No article text found to train on.")
+            else:
+                label_val = 0 if true_label_choice == "Real News" else 1
+                
+                with st.spinner("Refining models in real-time..."):
+                    # Preprocess and extract features
+                    clean_fb = preprocess_pipeline(last_text)
+                    x_tfidf_fb = st.session_state.vectorizer.transform([clean_fb])
+                    x_input_fb = append_stylistic_features(x_tfidf_fb, [last_text])
+                    
+                    # Online updates
+                    # 1. KNN
+                    st.session_state.knn.X_train = np.vstack((st.session_state.knn.X_train, x_input_fb))
+                    st.session_state.knn.y_train = np.append(st.session_state.knn.y_train, [label_val])
+                    
+                    # 2. Logistic Regression
+                    st.session_state.log_reg.partial_fit(x_input_fb, np.array([label_val]))
+                    
+                    # 3. Simple Neural Network
+                    st.session_state.nn.partial_fit(x_input_fb, np.array([label_val]))
+                    
+                    # Note: Random Forest cannot be fitted incrementally without full rebuild, so we leave it unchanged.
+                    
+                    # Log to CSV
+                    feedback_file = "user_feedback.csv"
+                    feedback_df = pd.DataFrame([{
+                        "timestamp": pd.Timestamp.now().isoformat(),
+                        "text_length": len(last_text),
+                        "submitted_truth": label_val,
+                        "clean_text": clean_fb[:200]
+                    }])
+                    if not os.path.exists(feedback_file):
+                        feedback_df.to_csv(feedback_file, index=False)
+                    else:
+                        feedback_df.to_csv(feedback_file, mode="a", header=False, index=False)
+                        
+                    # Save models to disk
+                    save_models_to_disk(
+                        st.session_state.vectorizer,
+                        st.session_state.knn,
+                        st.session_state.log_reg,
+                        st.session_state.rf,
+                        st.session_state.nn,
+                        st.session_state.metrics
+                    )
+                    
+                    # Run predictions using the newly updated models to update the dashboard instantly!
+                    p_knn = st.session_state.knn.predict(x_input_fb)[0]
+                    p_log = st.session_state.log_reg.predict(x_input_fb)[0]
+                    p_rf = st.session_state.rf.predict(x_input_fb)[0]
+                    p_nn = st.session_state.nn.predict(x_input_fb)[0]
+
+                    prob_log = st.session_state.log_reg.predict_proba(x_input_fb)[0]
+                    prob_nn = st.session_state.nn.predict_proba(x_input_fb)[0]
+                    
+                    # Update the results dictionary in session state
+                    res = st.session_state.verify_results
+                    res["p_knn"] = p_knn
+                    res["p_log"] = p_log
+                    res["p_rf"] = p_rf
+                    res["p_nn"] = p_nn
+                    res["prob_log"] = prob_log
+                    res["prob_nn"] = prob_nn
+                    
+                    # Recalculate combined models consensus
+                    predictions = [p_knn, p_log, p_rf, p_nn]
+                    fake_votes = sum(predictions)
+                    real_votes = 4 - fake_votes
+                    res["model_verdict"] = "FAKE" if fake_votes > real_votes else "REAL"
+                    res["model_confidence"] = max(fake_votes, real_votes) / 4.0 * 100
+                    res["fake_votes"] = fake_votes
+                    res["real_votes"] = real_votes
+                    
+                    # Recalculate final combined credibility score
+                    model_score = (real_votes / 4.0) * 100
+                    gemini_score = res["gemini_confidence"] if res["gemini_verdict"] == "REAL" else (100 - res["gemini_confidence"])
+                    
+                    final_credibility = int(model_score * 0.20 + res["cross_ref_score"] * 0.40 + gemini_score * 0.40)
+                    
+                    # Override rule check
+                    if res["total_sources"] == 0:
+                        final_credibility = min(20, final_credibility)
+                    final_credibility = max(0, min(100, final_credibility))
+                    
+                    res["final_credibility"] = final_credibility
+                    
+                    if final_credibility >= 60:
+                        res["final_verdict"] = "LIKELY REAL"
+                        res["verdict_color"] = "#10B981"
+                        res["verdict_emoji"] = "🟢"
+                        res["verdict_bg"] = "rgba(16, 185, 129, 0.15)"
+                    elif final_credibility >= 40:
+                        res["final_verdict"] = "UNCERTAIN"
+                        res["verdict_color"] = "#F59E0B"
+                        res["verdict_emoji"] = "🟡"
+                        res["verdict_bg"] = "rgba(245, 158, 11, 0.15)"
+                    else:
+                        res["final_verdict"] = "LIKELY FAKE"
+                        res["verdict_color"] = "#EF4444"
+                        res["verdict_emoji"] = "🔴"
+                        res["verdict_bg"] = "rgba(239, 68, 68, 0.15)"
+                    
+                    st.toast("✅ Models updated instantly in memory and saved to disk!")
+                    st.success("🎉 Correction saved! Model predictions have been refreshed instantly below.")
+                    time.sleep(2.0)
+                    st.rerun()

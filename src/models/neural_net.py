@@ -127,3 +127,44 @@ class SimpleNeuralNetwork(BaseModel):
         """
         probs = self.predict_proba(X)
         return (probs >= threshold).astype(int)
+
+    def partial_fit(self, X, y, lr=None):
+        """
+        Performs a single incremental training step (online learning) on a new batch/sample.
+        """
+        if self.W1 is None:
+            # Initialize if not already fitted
+            n_features = X.shape[1]
+            self.W1 = np.random.randn(n_features, self.hidden_dim) * np.sqrt(2.0 / n_features)
+            self.b1 = np.zeros((1, self.hidden_dim))
+            self.W2 = np.random.randn(self.hidden_dim, 1) * np.sqrt(2.0 / self.hidden_dim)
+            self.b2 = np.zeros((1, 1))
+            
+        X = np.array(X)
+        y = np.array(y).reshape(-1, 1)
+        
+        step_lr = lr if lr is not None else self.lr
+        
+        # --- FORWARD PASS ---
+        Z1 = np.dot(X, self.W1) + self.b1
+        A1 = self._relu(Z1)
+        Z2 = np.dot(A1, self.W2) + self.b2
+        A2 = self._sigmoid(Z2)
+        
+        # --- BACKPROPAGATION ---
+        m = X.shape[0]
+        dZ2 = A2 - y
+        dW2 = (1 / m) * np.dot(A1.T, dZ2)
+        db2 = (1 / m) * np.sum(dZ2, axis=0, keepdims=True)
+        
+        dA1 = np.dot(dZ2, self.W2.T)
+        dZ1 = dA1 * self._relu_derivative(Z1)
+        dW1 = (1 / m) * np.dot(X.T, dZ1)
+        db1 = (1 / m) * np.sum(dZ1, axis=0, keepdims=True)
+        
+        # --- PARAMETER UPDATES ---
+        self.W1 -= step_lr * dW1
+        self.b1 -= step_lr * db1
+        self.W2 -= step_lr * dW2
+        self.b2 -= step_lr * db2
+        return self
