@@ -131,6 +131,53 @@ def append_stylistic_features(X_tfidf, raw_texts):
     # Scale by 10 to give these features proportional representation in the sparse space
     return np.hstack((X_tfidf, excl * 10.0, upper * 10.0))
 
+def generate_interpretability_html(raw_text, vectorizer, log_reg):
+    import re
+    import html
+    from src.preprocessing import STOPWORDS
+    
+    # Tokenize preserving spaces, tabs, and newlines exactly
+    tokens = re.split(r'(\s+)', raw_text)
+    
+    vocab = vectorizer.vocabulary_
+    weights = log_reg.weights
+    
+    highlighted_tokens = []
+    threshold = 0.01  # Minimum weight to trigger highlight
+    
+    for token in tokens:
+        if not token.strip():
+            # Whitespace/newline - preserve as-is
+            highlighted_tokens.append(html.escape(token))
+            continue
+            
+        # Clean word to match vocabulary preprocessing logic
+        cleaned = token.lower()
+        cleaned = re.sub(r'[^a-zA-Z0-9]', '', cleaned)
+        
+        if cleaned and cleaned not in STOPWORDS and cleaned in vocab:
+            idx = vocab[cleaned]
+            weight = weights[idx, 0]
+            
+            # Format numbers safely
+            escaped_token = html.escape(token)
+            if weight > threshold:
+                # Fake association (Red shading)
+                highlighted_tokens.append(
+                    f"<span style='background-color: rgba(239, 68, 68, 0.18); color: #F87171; border-radius: 4px; padding: 1px 3px; font-weight: 600; cursor: help;' title='Weight: {weight:+.4f} (Fake News factor)'>{escaped_token}</span>"
+                )
+            elif weight < -threshold:
+                # Real association (Green shading)
+                highlighted_tokens.append(
+                    f"<span style='background-color: rgba(16, 185, 129, 0.18); color: #34D399; border-radius: 4px; padding: 1px 3px; font-weight: 600; cursor: help;' title='Weight: {weight:+.4f} (Real News factor)'>{escaped_token}</span>"
+                )
+            else:
+                highlighted_tokens.append(escaped_token)
+        else:
+            highlighted_tokens.append(html.escape(token))
+            
+    return "".join(highlighted_tokens)
+
 @st.cache_data(show_spinner=False)
 def load_and_preprocess_subset(sample_size, vocab_size):
     """
@@ -930,8 +977,22 @@ with tab3:
                 "ignited a massive controversy across global religious organizations."
             )
 
+    # Calculate remaining characters dynamically
+    current_text = st.session_state.get("news_input_area", "")
+    remaining = max(0, 600 - len(current_text))
+    
+    # Styled remaining counter
+    counter_color = "#94A3B8" if remaining > 50 else "#EF4444"
+    st.markdown(
+        f"<div style='text-align: right; font-size: 0.85rem; color: {counter_color}; font-weight: bold; margin-bottom: 2px;'>"
+        f"📝 Characters remaining: {remaining} / 600"
+        f"</div>", 
+        unsafe_allow_html=True
+    )
+
     news_input = st.text_area("News text to verify:", key="news_input_area", height=180, 
-                             placeholder="Enter headline or article paragraph here...")
+                             placeholder="Enter headline or article paragraph here...",
+                             max_chars=600)
 
     # Load API keys silently from .env
     news_api_key = load_env_api_key("NEWS_API_KEY")
@@ -939,7 +1000,9 @@ with tab3:
 
     verify_trigger = st.button("🔍 Verify Article & Search Live Coverage", use_container_width=True)
 
-    # Initialize session state for news verification results
+    # Initialize request list and results in session state
+    if "verification_timestamps" not in st.session_state:
+        st.session_state.verification_timestamps = []
     if "verify_results" not in st.session_state:
         st.session_state.verify_results = None
 
@@ -949,155 +1012,179 @@ with tab3:
         elif not news_input.strip():
             st.warning("⚠️ Please enter some news text to verify.")
         else:
-            # Clear previous results during calculation
-            st.session_state.verify_results = None
-            st.session_state.feedback_success = None
+            # Check for Rate Limiting to protect API keys
+            current_time = time.time()
+            st.session_state.verification_timestamps = [
+                t for t in st.session_state.verification_timestamps if current_time - t < 60
+            ]
             
-            # 1. Classification Phase
-            with st.spinner("Analyzing text and running custom model predictions..."):
-                clean_input = preprocess_pipeline(news_input)
-                x_tfidf = st.session_state.vectorizer.transform([clean_input])
-                x_input = append_stylistic_features(x_tfidf, [news_input])
+            run_verification = True
+            
+            if run_verification and len(st.session_state.verification_timestamps) >= 5:
+                # Calculate exactly how many seconds until the oldest request in the window expires
+                oldest_timestamp = st.session_state.verification_timestamps[0]
+                wait_time = max(1, int(oldest_timestamp + 60 - current_time))
+                st.toast(f"⚠️ Rate limit reached (5 requests/minute). Please wait {wait_time}s before verifying again.", icon="⚠️")
+                run_verification = False
+                
+            if run_verification:
+                # Accept request and record timestamp
+                st.session_state.verification_timestamps.append(current_time)
+                
+                # Clear previous results during calculation
+                st.session_state.verify_results = None
+                st.session_state.feedback_success = None
+                
+                # 1. Classification Phase
+                with st.spinner("Analyzing text and running custom model predictions..."):
+                    clean_input = preprocess_pipeline(news_input)
+                    x_tfidf = st.session_state.vectorizer.transform([clean_input])
+                    x_input = append_stylistic_features(x_tfidf, [news_input])
 
-                p_knn = st.session_state.knn.predict(x_input)[0]
-                p_log = st.session_state.log_reg.predict(x_input)[0]
-                p_rf = st.session_state.rf.predict(x_input)[0]
-                p_nn = st.session_state.nn.predict(x_input)[0]
+                    p_knn = st.session_state.knn.predict(x_input)[0]
+                    p_log = st.session_state.log_reg.predict(x_input)[0]
+                    p_rf = st.session_state.rf.predict(x_input)[0]
+                    p_nn = st.session_state.nn.predict(x_input)[0]
 
-                prob_log = st.session_state.log_reg.predict_proba(x_input)[0]
-                prob_nn = st.session_state.nn.predict_proba(x_input)[0]
+                    prob_log = st.session_state.log_reg.predict_proba(x_input)[0]
+                    prob_nn = st.session_state.nn.predict_proba(x_input)[0]
+                    
+                # 2. Extract Query
+                with st.spinner("Extracting search keywords from text..."):
+                    search_query = extract_query_with_gemini(news_input)
+                    
+                # 3. Search Live Coverage
+                raw_api = []
+                raw_data = []
+                newsapi_count = 0
+                newsdata_count = 0
                 
-            # 2. Extract Query
-            with st.spinner("Extracting search keywords from text..."):
-                search_query = extract_query_with_gemini(news_input)
+                if news_api_key:
+                    with st.spinner("Searching NewsAPI for live coverage..."):
+                        raw_api = fetch_live_news(search_query, news_api_key) or []
+                        newsapi_count = len(raw_api)
                 
-            # 3. Search Live Coverage
-            raw_api = []
-            raw_data = []
-            newsapi_count = 0
-            newsdata_count = 0
-            
-            if news_api_key:
-                raw_api = fetch_live_news(search_query, news_api_key) or []
-                newsapi_count = len(raw_api)
+                if newsdata_api_key:
+                    with st.spinner("Searching NewsData.io for live coverage..."):
+                        raw_data = fetch_newsdata_io(search_query, newsdata_api_key) or []
+                        newsdata_count = len(raw_data)
+                        
+                total_sources = newsapi_count + newsdata_count
                 
-            if newsdata_api_key:
-                raw_data = fetch_newsdata_io(search_query, newsdata_api_key) or []
-                newsdata_count = len(raw_data)
+                # Construct a clean text summary of the live news coverage to pass to Gemini
+                coverage_items = []
+                if raw_api:
+                    for art in raw_api[:3]:
+                        title = art.get('title', 'No Title')
+                        source = art.get('source', {}).get('name', 'Unknown')
+                        desc = art.get('description', '') or ''
+                        coverage_items.append(f"- [{source}] {title}: {desc[:150]}")
+                if raw_data:
+                    for art in raw_data[:3]:
+                        title = art.get('title', 'No Title')
+                        source = art.get('source_id', 'Unknown').upper()
+                        desc = art.get('description', '') or ''
+                        coverage_items.append(f"- [{source}] {title}: {desc[:150]}")
                 
-            total_sources = newsapi_count + newsdata_count
-            
-            # Construct a clean text summary of the live news coverage to pass to Gemini
-            coverage_items = []
-            if raw_api:
-                for art in raw_api[:3]:
-                    title = art.get('title', 'No Title')
-                    source = art.get('source', {}).get('name', 'Unknown')
-                    desc = art.get('description', '') or ''
-                    coverage_items.append(f"- [{source}] {title}: {desc[:150]}")
-            if raw_data:
-                for art in raw_data[:3]:
-                    title = art.get('title', 'No Title')
-                    source = art.get('source_id', 'Unknown').upper()
-                    desc = art.get('description', '') or ''
-                    coverage_items.append(f"- [{source}] {title}: {desc[:150]}")
-            
-            coverage_text = "\n".join(coverage_items) if coverage_items else "No live news coverage found."
-            
-            with st.spinner("🤖 Gemini AI is analyzing the article for fact-checking..."):
-                gemini_result = gemini_fact_check(news_input, search_query, coverage_text)
+                coverage_text = "\n".join(coverage_items) if coverage_items else "No live news coverage found."
                 
-            # Signal 1: ML Model Ensemble Vote
-            predictions = [p_knn, p_log, p_rf, p_nn]
-            fake_votes = sum(predictions)
-            real_votes = 4 - fake_votes
-            model_verdict = "FAKE" if fake_votes > real_votes else "REAL"
-            model_confidence = max(fake_votes, real_votes) / 4.0 * 100
-            
-            # Signal 2: Cross-Reference Score (more sources = more likely real)
-            if total_sources >= 5:
-                cross_ref_score = 100  # Well covered — likely real
-            elif total_sources >= 2:
-                cross_ref_score = 60   # Some coverage
-            elif total_sources == 1:
-                cross_ref_score = 30   # Minimal coverage
-            else:
-                cross_ref_score = 0    # No coverage — suspicious
+                with st.spinner("🤖 Gemini AI is analyzing the article for fact-checking..."):
+                    gemini_result = gemini_fact_check(news_input, search_query, coverage_text)
+                    
+                # Signal 1: ML Model Ensemble Vote
+                predictions = [p_knn, p_log, p_rf, p_nn]
+                fake_votes = sum(predictions)
+                real_votes = 4 - fake_votes
+                model_verdict = "FAKE" if fake_votes > real_votes else "REAL"
+                model_confidence = max(fake_votes, real_votes) / 4.0 * 100
                 
-            # Signal 3: Gemini AI Verdict
-            gemini_verdict = "UNKNOWN"
-            gemini_confidence = 50
-            gemini_reasoning = "Gemini API was unavailable for analysis."
-            if gemini_result:
-                gemini_verdict = gemini_result["verdict"]
-                gemini_confidence = gemini_result["confidence"]
-                gemini_reasoning = gemini_result["reasoning"]
+                # Signal 2: Cross-Reference Score (more sources = more likely real)
+                if total_sources >= 5:
+                    cross_ref_score = 100  # Well covered — likely real
+                elif total_sources >= 2:
+                    cross_ref_score = 60   # Some coverage
+                elif total_sources == 1:
+                    cross_ref_score = 30   # Minimal coverage
+                else:
+                    cross_ref_score = 0    # No coverage — suspicious
+                    
+                # Signal 3: Gemini AI Verdict
+                gemini_verdict = "UNKNOWN"
+                gemini_confidence = 50
+                gemini_reasoning = "Gemini API was unavailable for analysis."
+                if gemini_result:
+                    gemini_verdict = gemini_result["verdict"]
+                    gemini_confidence = gemini_result["confidence"]
+                    gemini_reasoning = gemini_result["reasoning"]
+                    
+                # Final Weighted Credibility Score
+                model_score = (real_votes / 4.0) * 100
+                gemini_score = gemini_confidence if gemini_verdict == "REAL" else (100 - gemini_confidence)
                 
-            # Final Weighted Credibility Score
-            model_score = (real_votes / 4.0) * 100
-            gemini_score = gemini_confidence if gemini_verdict == "REAL" else (100 - gemini_confidence)
-            
-            final_credibility = int(model_score * 0.20 + cross_ref_score * 0.40 + gemini_score * 0.40)
-            
-            # --- REAL-TIME OVERRIDE RULE ---
-            override_applied = False
-            if total_sources == 0:
-                final_credibility = min(20, final_credibility)
-                override_applied = True
+                final_credibility = int(model_score * 0.20 + cross_ref_score * 0.40 + gemini_score * 0.40)
                 
-            final_credibility = max(0, min(100, final_credibility))
-            
-            if final_credibility >= 60:
-                final_verdict = "LIKELY REAL"
-                verdict_color = "#10B981"
-                verdict_emoji = "🟢"
-                verdict_bg = "rgba(16, 185, 129, 0.15)"
-            elif final_credibility >= 40:
-                final_verdict = "UNCERTAIN"
-                verdict_color = "#F59E0B"
-                verdict_emoji = "🟡"
-                verdict_bg = "rgba(245, 158, 11, 0.15)"
-            else:
-                final_verdict = "LIKELY FAKE"
-                verdict_color = "#EF4444"
-                verdict_emoji = "🔴"
-                verdict_bg = "rgba(239, 68, 68, 0.15)"
+                # --- REAL-TIME OVERRIDE RULE ---
+                override_applied = False
+                if total_sources == 0:
+                    final_credibility = min(20, final_credibility)
+                    override_applied = True
+                    
+                final_credibility = max(0, min(100, final_credibility))
                 
-            # Save results dictionary in session state
-            st.session_state.verify_results = {
-                "news_input": news_input,
-                "p_knn": p_knn,
-                "p_log": p_log,
-                "p_rf": p_rf,
-                "p_nn": p_nn,
-                "prob_log": prob_log,
-                "prob_nn": prob_nn,
-                "search_query": search_query,
-                "raw_api": raw_api,
-                "raw_data": raw_data,
-                "newsapi_count": newsapi_count,
-                "newsdata_count": newsdata_count,
-                "gemini_result": gemini_result,
-                "total_sources": total_sources,
-                "cross_ref_score": cross_ref_score,
-                "gemini_verdict": gemini_verdict,
-                "gemini_confidence": gemini_confidence,
-                "gemini_reasoning": gemini_reasoning,
-                "final_credibility": final_credibility,
-                "override_applied": override_applied,
-                "final_verdict": final_verdict,
-                "verdict_color": verdict_color,
-                "verdict_emoji": verdict_emoji,
-                "verdict_bg": verdict_bg,
-                "model_verdict": model_verdict,
-                "model_confidence": model_confidence,
-                "fake_votes": fake_votes,
-                "real_votes": real_votes,
-                "k_neighbors": st.session_state.knn.k,
-                "rf_trees": st.session_state.rf.n_estimators
-            }
-            # Force rerun to display immediately
-            st.rerun()
+                if final_credibility >= 60:
+                    final_verdict = "LIKELY REAL"
+                    verdict_color = "#10B981"
+                    verdict_emoji = "🟢"
+                    verdict_bg = "rgba(16, 185, 129, 0.15)"
+                elif final_credibility >= 40:
+                    final_verdict = "UNCERTAIN"
+                    verdict_color = "#F59E0B"
+                    verdict_emoji = "🟡"
+                    verdict_bg = "rgba(245, 158, 11, 0.15)"
+                else:
+                    final_verdict = "LIKELY FAKE"
+                    verdict_color = "#EF4444"
+                    verdict_emoji = "🔴"
+                    verdict_bg = "rgba(239, 68, 68, 0.15)"
+                    
+                highlighted_html = generate_interpretability_html(news_input, st.session_state.vectorizer, st.session_state.log_reg)
+                
+                # Save results dictionary in session state
+                st.session_state.verify_results = {
+                    "news_input": news_input,
+                    "p_knn": p_knn,
+                    "p_log": p_log,
+                    "p_rf": p_rf,
+                    "p_nn": p_nn,
+                    "prob_log": prob_log,
+                    "prob_nn": prob_nn,
+                    "search_query": search_query,
+                    "raw_api": raw_api,
+                    "raw_data": raw_data,
+                    "newsapi_count": newsapi_count,
+                    "newsdata_count": newsdata_count,
+                    "gemini_result": gemini_result,
+                    "total_sources": total_sources,
+                    "cross_ref_score": cross_ref_score,
+                    "gemini_verdict": gemini_verdict,
+                    "gemini_confidence": gemini_confidence,
+                    "gemini_reasoning": gemini_reasoning,
+                    "final_credibility": final_credibility,
+                    "override_applied": override_applied,
+                    "final_verdict": final_verdict,
+                    "verdict_color": verdict_color,
+                    "verdict_emoji": verdict_emoji,
+                    "verdict_bg": verdict_bg,
+                    "model_verdict": model_verdict,
+                    "model_confidence": model_confidence,
+                    "fake_votes": fake_votes,
+                    "real_votes": real_votes,
+                    "k_neighbors": st.session_state.knn.k,
+                    "rf_trees": st.session_state.rf.n_estimators,
+                    "highlighted_html": highlighted_html
+                }
+                # Force rerun to display immediately
+                st.rerun()
 
     # --- RENDER STAGE (OUTSIDE VERIFY TRIGGER) ---
     if st.session_state.verify_results is not None:
