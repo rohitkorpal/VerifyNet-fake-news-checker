@@ -57,12 +57,31 @@ def remove_stopwords(tokens):
     """
     return [token for token in tokens if token not in STOPWORDS]
 
+def strip_datelines_and_leakage(text):
+    """
+    Strips dateline prefixes commonly found in news agency reports.
+    Example: 'WASHINGTON (Reuters) - ...' -> '...'
+    Also removes explicit publisher tags like '(Reuters)', 'Reuters', etc.
+    """
+    if not isinstance(text, str):
+        return ""
+        
+    # Match pattern: Location (Publisher) - or Location (Publisher) --
+    # e.g., 'WASHINGTON (Reuters) - ' or 'SEOUL/LONDON (Reuters) -- '
+    text_clean = re.sub(r'^[A-Z\s,\./]+ \([A-Za-z\s]+\)\s*-\s*-?', '', text)
+    
+    # Also strip just '(Reuters)' or 'Reuters' to prevent the model from learning shortcuts
+    text_clean = re.sub(r'\b(reuters|reuters.com)\b', '', text_clean, flags=re.IGNORECASE)
+    
+    return text_clean
+
 def preprocess_pipeline(text):
     """
     Complete pipeline: clean, tokenize, and remove stopwords.
     Returns a string of cleaned words joined by space.
     """
-    cleaned = clean_text(text)
+    scrubbed = strip_datelines_and_leakage(text)
+    cleaned = clean_text(scrubbed)
     tokens = tokenize(cleaned)
     filtered = remove_stopwords(tokens)
     return " ".join(filtered)
