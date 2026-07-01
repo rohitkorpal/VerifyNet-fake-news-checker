@@ -271,6 +271,19 @@ def fetch_newsdata_io(query, api_key):
         return None
 
 def load_env_api_key(key_name):
+    # 1. Streamlit Secrets (Cloud Deployment)
+    try:
+        if key_name in st.secrets:
+            return st.secrets[key_name]
+    except Exception:
+        pass
+
+    # 2. Environment Variables
+    value = os.getenv(key_name)
+    if value:
+        return value
+
+    # 3. Local .env file
     if os.path.exists(".env"):
         try:
             with open(".env", "r") as f:
@@ -280,6 +293,7 @@ def load_env_api_key(key_name):
                         return parts[1].strip()
         except Exception:
             pass
+
     return ""
 
 def extract_query_with_gemini(text):
